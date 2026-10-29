@@ -55,6 +55,9 @@ object LinearState:
   final class Snap(private[llm] val scope: Scope, private[llm] val conv: Arr | Null,
       private[llm] val state: Arr | Null, val bytes: Long = 0L):
     def close(): Unit = scope.close()
+    def tensors(i: Int): Vector[(String, Arr)] =
+      (if conv == null then Vector.empty else Vector(s"$i.conv" -> conv.nn)) ++
+        (if state == null then Vector.empty else Vector(s"$i.state" -> state.nn))
 
 /** QWEN3.5 AND QWEN3.6: a hybrid decoder — three layers in four linear attention (Gated DeltaNet: a causal
  * convolution, then the gated delta rule's recurrence, a Metal kernel), the fourth full attention with an output
@@ -142,9 +145,21 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       l.snapshot() })
   private val linearBytes = 2L * (convKernel - 1) * (2 * linearKeyHeads * linearKeyDim + linearValueHeads *
     linearValueDim) + 4L * linearValueHeads * linearValueDim * linearKeyDim
-  private final class Snapshot(val snaps: Vector[KvCache.Snap | LinearState.Snap]) extends Model.Snapshot:
+  private final class Snapshot(val snaps: Vector[KvCache.Snap | LinearState.Snap], owner: Scope | Null = null)
+      extends Model.Snapshot:
     def bytes: Long = snaps.map { case k: KvCache.Snap => k.bytes; case _: LinearState.Snap => linearBytes }.sum
-    def close(): Unit = snaps.foreach { case k: KvCache.Snap => k.close(); case l: LinearState.Snap => l.close() }
+    def close(): Unit =
+      snaps.foreach { case k: KvCache.Snap => k.close(); case l: LinearState.Snap => l.close() }
+      if owner != null then owner.nn.close()
+    def tensors(using Scope): Vector[(String, Arr)] = snaps.zipWithIndex.flatMap {
+      case (k: KvCache.Snap, i) => k.tensors(i)
+      case (l: LinearState.Snap, i) => l.tensors(i)
+    }
+    def meta: Map[String, String] = snaps.zipWithIndex.collect { case (k: KvCache.Snap, i) => k.meta(i) }.flatten.toMap
+  def snapshotOf(tensors: Map[String, Arr], meta: Map[String, String], owner: Scope): Model.Snapshot =
+    Snapshot(blocks.zipWithIndex.map((l, i) =>
+      if l.linear then LinearState.Snap(new Scope, tensors.get(s"$i.conv").orNull, tensors.get(s"$i.state").orNull)
+      else KvCache.snapOf(i, tensors, meta, kvHeads, headDim)), owner)
   def restore(snapshot: Model.Snapshot): State =
     val st = newState()
     st.caches.zip(snapshot.asInstanceOf[Snapshot].snaps).foreach {

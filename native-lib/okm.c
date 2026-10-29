@@ -96,6 +96,15 @@ void* okm_conv1d(void* x, void* w, int stride, int padding, int dilation, int gr
 }
 void* okm_scalar_i32(int v) { return mlx_array_new_int(v).ctx; }
 
+// sampling
+void* okm_cumsum(void* a, int axis) {
+  RET(mlx_cumsum_axis(&r, A(a), axis, false, true, (mlx_optional_dtype){.has_value = false}, S));
+}
+void* okm_greater(void* a, void* b) { RET(mlx_greater(&r, A(a), A(b), S)); }
+void* okm_where(void* c, void* a, void* b) { RET(mlx_where(&r, A(c), A(a), A(b), S)); }
+void* okm_categorical(void* logits, int axis) { RET(mlx_random_categorical(&r, A(logits), axis, (mlx_array){0}, S)); }
+int okm_random_seed(long seed) { return mlx_random_seed((uint64_t)seed); }
+
 // quantized: `bits` and `group_size` of the affine mode
 void* okm_quantized_matmul(void* x, void* w, void* scales, void* biases, int transpose, int group_size, int bits) {
   RET(mlx_quantized_matmul(&r, A(x), A(w), A(scales), A(biases), transpose, oi(group_size), oi(bits), "affine", S));
@@ -252,6 +261,17 @@ int okm_load_next(void* file, const char** key, void** value) {
   if (mlx_map_string_to_array_iterator_next(key, &v, f->it)) { mlx_array_free(v); return 0; }
   mlx_array own = mlx_array_new(); mlx_array_set(&own, v); mlx_array_free(v);
   *value = own.ctx; return 1;
+}
+// arrays saved, by name, with string metadata
+int okm_save_safetensors(const char* path, const char** names, void** arrays, int n, const char** keys,
+    const char** values, int m) {
+  mlx_map_string_to_array map = mlx_map_string_to_array_new();
+  mlx_map_string_to_string meta = mlx_map_string_to_string_new();
+  for (int i = 0; i < n; i++) mlx_map_string_to_array_insert(map, names[i], A(arrays[i]));
+  for (int i = 0; i < m; i++) mlx_map_string_to_string_insert(meta, keys[i], values[i]);
+  int e = mlx_save_safetensors(path, map, meta);
+  mlx_map_string_to_array_free(map); mlx_map_string_to_string_free(meta);
+  return e;
 }
 void okm_load_close(void* file) {
   okm_file* f = file; mlx_map_string_to_array_iterator_free(f->it); mlx_map_string_to_array_free(f->m);

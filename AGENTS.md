@@ -21,7 +21,14 @@ Apple's MLX from Scala 3 on two platforms, one model code: the JVM through FFM (
 
 - `PrefixCache`: `Model.State.snapshot()` (handles of their own on the same arrays: `okm_retain`; MLX copies on
   the next update) at `Chat.marks` (the second and the last `<|im_start|>`); `Session(..., cache, marks)` restores the
-  longest kept prefix of the prompt. Snapshots only at marks: a linear layer's state is not cut back.
+  longest kept prefix of the prompt. Snapshots only at marks: a linear layer's state is not cut back. `PrefixStore`:
+  the first mark's snapshot written as safetensors (tokens in the metadata; the index is the headers), 4 GB budget —
+  NOT every turn's (a 60k conversation wrote 31 GB in one run).
+- `Sampling` (greedy / temperature, top_k by argpartition, top_p by cumsum, categorical, seed); `Sampling.of(dir)`
+  reads generation_config.json. Decode: `Session.next` builds and starts the next step BEFORE reading the current
+  token (else no overlap: 13%); okm.c compiles mlx_lm's compiled functions (silu, swiglu, precise_swiglu,
+  compute_g) with `mlx_compile` — same ops, same order, same numbers. Probes: decodeProbe (also exports a step's
+  graph: okm_export_dot), prefillCurve, gdnAb.
 
 Rules:
 - A HANDLE HELD KEEPS ITS BUFFER: MLX frees an intermediate once the graph is done with it only if no handle holds

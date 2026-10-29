@@ -31,5 +31,11 @@ object Chat:
       case Json.Arr(ids) => ids.map(_.int).toSet
       case Json.Null => Set.empty[Int]
       case id => Set(id.int)
-    val stops = eos ++ Set("<|im_end|>", "<|endoftext|>").map(tokenizer.id).filter(_ >= 0)
+    val gen = dir.resolve("generation_config.json")
+    val genEos = if !Files.exists(gen) then Set.empty[Int] else
+      Json.fromText(Files.readString(gen))("eos_token_id") match
+        case Json.Arr(ids) => ids.map(_.int).toSet
+        case Json.Null => Set.empty[Int]
+        case id => Set(id.int)
+    val stops = eos ++ genEos ++ Set("<|im_end|>", "<|endoftext|>").map(tokenizer.id).filter(_ >= 0)
     Chat(tokenizer, ChatTemplate.load(dir), stops)

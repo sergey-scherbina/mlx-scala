@@ -15,7 +15,7 @@ sbt test                                              # the JVM and Scala Native
 |---|---|---|
 | `native-lib/okm.c` | mlx-c flattened: every argument a pointer, an int or a float — no struct by value crosses | mlx-c |
 | `mlx` | the MLX API: `Arr`, `Scope`, ops, fast kernels, quantized matmul, safetensors. `Okm` per platform: FFM `MethodHandle`s on the JVM, `@extern` on Scala Native — the rest shared | `okm` alone |
-| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `Qwen35` (Qwen3.5, Qwen3.6: Gated DeltaNet, MoE), `KvCache`, `Session`, `PrefixCache` | `mlx` alone |
+| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `Qwen35` (Qwen3.5, Qwen3.6: Gated DeltaNet, MoE), `KvCache`, `Session`, `Sampling`, `PrefixCache`, `PrefixStore` | `mlx` alone |
 
 ```scala
 val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit").get
@@ -31,9 +31,15 @@ mlx/llm/nfc.txt by `scripts/gen-nfc.py` — on Native the app builds with `withE
 Qwen3.6's chat templates against jinja2 as transformers configures it — system turns, thinking, tools, tool calls and
 responses, content parts.
 
+Decode at mlx_lm's speed: Qwen3.6-35B-A3B 117 tok/s against mlx_lm's 118 (the next step built and started before
+the last token is read; the elementwise functions mlx_lm compiles — silu, swiglu, precise_swiglu, compute_g —
+compiled by MLX the same way, in okm.c). Tokens drawn as `Sampling` says — greedy, or temperature, top_k, top_p, a
+seed; a model's own from its generation_config.json — on the GPU.
+
 A prompt's prefixes are kept between generations (`PrefixCache`): a model's state snapshot at the marks `Chat.marks`
 gives — where messages begin; a hybrid model's recurrent state cannot be cut shorter, so a prefix is reused whole —
-and a prompt beginning with one is computed from there. Claude Code's next turn: 13.6k tokens' prefill 16 s → 0.2–0.3 s.
+and a prompt beginning with one is computed from there; a prompt's first mark (the system prompt and the tools)
+written to disk too (`PrefixStore`, safetensors, 4 GB by default), so a restart does not compute it again. Claude Code's next turn: 13.6k tokens' prefill 16 s → 0.2–0.3 s.
 
 JSON is okay-simple's value module alone, `okay-effects-json-value` (no dependency) — the same JSON as okay-llm's.
 

@@ -62,6 +62,11 @@ private[mlx] object Okm:
   private val hQmm = fn("okm_quantized_matmul", J, J, J, J, J, I, I, I)
   private val hSubtract = fn("okm_subtract", J, J, J)
   private val hSilu = fn("okm_silu", J, J)
+  private val hCumsum = fn("okm_cumsum", J, J, I)
+  private val hGreater = fn("okm_greater", J, J, J)
+  private val hWhere = fn("okm_where", J, J, J, J)
+  private val hCategorical = fn("okm_categorical", J, J, I)
+  private val hSeed = fn("okm_random_seed", I, J)
   private val hSwiglu = fn("okm_swiglu", J, J, J)
   private val hPreciseSwiglu = fn("okm_precise_swiglu", J, J, J, J)
   private val hComputeG = fn("okm_compute_g", J, J, J, J)
@@ -89,6 +94,7 @@ private[mlx] object Okm:
   private val hLoadOpen = fn("okm_load_open", J, J)
   private val hLoadNext = fn("okm_load_next", I, J, J, J)
   private val hLoadClose = fn("okm_load_close", null, J)
+  private val hSave = fn("okm_save_safetensors", I, J, J, J, I, J, J, I)
   private val hActive = fn("okm_active_memory", J)
   private val hExportDot = fn("okm_export_dot", I, J, J)
   private val hPeak = fn("okm_peak_memory", J)
@@ -155,6 +161,11 @@ private[mlx] object Okm:
 
   def subtract(a: Long, b: Long): Long = hSubtract.invokeExact(a, b)
   def silu(a: Long): Long = hSilu.invokeExact(a)
+  def cumsum(a: Long, axis: Int): Long = hCumsum.invokeExact(a, axis)
+  def greater(a: Long, b: Long): Long = hGreater.invokeExact(a, b)
+  def where(c: Long, a: Long, b: Long): Long = hWhere.invokeExact(c, a, b)
+  def categorical(logits: Long, axis: Int): Long = hCategorical.invokeExact(logits, axis)
+  def randomSeed(seed: Long): Int = hSeed.invokeExact(seed)
   def swiglu(gate: Long, x: Long): Long = hSwiglu.invokeExact(gate, x)
   def preciseSwiglu(h: Long, gate: Long, x: Long): Long = hPreciseSwiglu.invokeExact(h, gate, x)
   def computeG(aLog: Long, a: Long, dtBias: Long): Long = hComputeG.invokeExact(aLog, a, dtBias)
@@ -221,6 +232,15 @@ private[mlx] object Okm:
       val key = MemorySegment.ofAddress(s.get(JAVA_LONG, at)).reinterpret(4096).getString(0)
       (key, s.get(JAVA_LONG, at + 8))
   def loadClose(file: Long): Unit = hLoadClose.invokeExact(file)
+  def saveSafetensors(path: String, names: Array[String], arrays: Array[Long], keys: Array[String],
+      values: Array[String]): Int =
+    val arena = Arena.ofConfined()
+    try
+      val as = arena.allocateFrom(JAVA_LONG, (if arrays.isEmpty then Array(0L) else arrays)*)
+      val r: Int = hSave.invokeExact(arena.allocateFrom(path).address(), strings(arena, names).address(), as.address(),
+        names.length, strings(arena, keys).address(), strings(arena, values).address(), keys.length)
+      r
+    finally arena.close()
   def activeMemory(): Long = hActive.invokeExact()
   def exportDot(a: Long, path: String): Int =
     val arena = Arena.ofConfined()

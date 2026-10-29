@@ -39,6 +39,11 @@ private object C:
   def okm_dequantize(w: Long, s: Long, b: Long, gs: CInt, bits: CInt): Long = extern
   def okm_subtract(a: Long, b: Long): Long = extern
   def okm_silu(a: Long): Long = extern
+  def okm_cumsum(a: Long, axis: CInt): Long = extern
+  def okm_greater(a: Long, b: Long): Long = extern
+  def okm_where(c: Long, a: Long, b: Long): Long = extern
+  def okm_categorical(logits: Long, axis: CInt): Long = extern
+  def okm_random_seed(seed: Long): CInt = extern
   def okm_swiglu(gate: Long, x: Long): Long = extern
   def okm_precise_swiglu(h: Long, gate: Long, x: Long): Long = extern
   def okm_compute_g(aLog: Long, a: Long, dtBias: Long): Long = extern
@@ -69,6 +74,8 @@ private object C:
   def okm_load_open(path: CString): Long = extern
   def okm_load_next(file: Long, key: Ptr[CString], value: Ptr[Long]): CInt = extern
   def okm_load_close(file: Long): Unit = extern
+  def okm_save_safetensors(path: CString, names: Ptr[CString], arrays: Ptr[Long], n: CInt, keys: Ptr[CString],
+      values: Ptr[CString], m: CInt): CInt = extern
   def okm_active_memory(): Long = extern
   def okm_export_dot(a: Long, path: CString): CInt = extern
   def okm_peak_memory(): Long = extern
@@ -131,6 +138,11 @@ private[mlx] object Okm:
 
   def subtract(a: Long, b: Long): Long = C.okm_subtract(a, b)
   def silu(a: Long): Long = C.okm_silu(a)
+  def cumsum(a: Long, axis: Int): Long = C.okm_cumsum(a, axis)
+  def greater(a: Long, b: Long): Long = C.okm_greater(a, b)
+  def where(c: Long, a: Long, b: Long): Long = C.okm_where(c, a, b)
+  def categorical(logits: Long, axis: Int): Long = C.okm_categorical(logits, axis)
+  def randomSeed(seed: Long): Int = C.okm_random_seed(seed)
   def swiglu(gate: Long, x: Long): Long = C.okm_swiglu(gate, x)
   def preciseSwiglu(h: Long, gate: Long, x: Long): Long = C.okm_precise_swiglu(h, gate, x)
   def computeG(aLog: Long, a: Long, dtBias: Long): Long = C.okm_compute_g(aLog, a, dtBias)
@@ -184,6 +196,14 @@ private[mlx] object Okm:
     val value = stackalloc[Long]()
     if C.okm_load_next(file, key, value) == 0 then null else (fromCString(!key), !value)
   def loadClose(file: Long): Unit = C.okm_load_close(file)
+  def saveSafetensors(path: String, names: Array[String], arrays: Array[Long], keys: Array[String],
+      values: Array[String]): Int =
+    Zone.acquire { implicit z =>
+      val as = alloc[Long](arrays.length.max(1))
+      for (x, i) <- arrays.zipWithIndex do as(i) = x
+      C.okm_save_safetensors(toCString(path), strings(names), as, names.length, strings(keys), strings(values),
+        keys.length)
+    }
   def activeMemory(): Long = C.okm_active_memory()
   def exportDot(a: Long, path: String): Int = Zone.acquire(implicit z => C.okm_export_dot(a, toCString(path)))
   def peakMemory(): Long = C.okm_peak_memory()

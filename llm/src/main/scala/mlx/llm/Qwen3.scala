@@ -86,6 +86,18 @@ object KvCache:
       headDim: Int):
     def bytes: Long = 2L * capacity * kvHeads * headDim * 2
     def close(): Unit = scope.close()
+    /** the buffers cut to what they hold, named after layer `i` */
+    def tensors(i: Int)(using Scope): Vector[(String, Arr)] =
+      if keys == null then Vector.empty
+      else
+        val stop = Seq(1, kvHeads, offset, headDim)
+        Vector(s"$i.k" -> slice(keys.nn, Seq(0, 0, 0, 0), stop), s"$i.v" -> slice(values.nn, Seq(0, 0, 0, 0), stop))
+    def meta(i: Int): Map[String, String] = Map(s"$i.offset" -> offset.toString)
+
+  /** a snapshot of layer `i` from a file's tensors (they hold `offset` positions, and no more room) */
+  def snapOf(i: Int, t: Map[String, Arr], meta: Map[String, String], kvHeads: Int, headDim: Int): Snap =
+    val offset = meta.get(s"$i.offset").map(_.toInt).getOrElse(0)
+    Snap(new Scope, t.get(s"$i.k").orNull, t.get(s"$i.v").orNull, offset, offset, kvHeads, headDim)
 
 /** QWEN3: a decoder of `layers` blocks — attention with GQA and q/k RMS norms, RoPE; a SwiGLU MLP — over quantized
  * weights; the embedding is the output layer too (tied) */
@@ -118,9 +130,13 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   final class State(val caches: Vector[KvCache]) extends Model.State:
     def close(): Unit = caches.foreach(_.close())
     def snapshot(): Model.Snapshot = Snapshot(caches.map(_.snapshot()))
-  private final class Snapshot(val snaps: Vector[KvCache.Snap]) extends Model.Snapshot:
+  private final class Snapshot(val snaps: Vector[KvCache.Snap], owner: Scope | Null = null) extends Model.Snapshot:
     def bytes: Long = snaps.map(_.bytes).sum
-    def close(): Unit = snaps.foreach(_.close())
+    def close(): Unit = { snaps.foreach(_.close()); if owner != null then owner.nn.close() }
+    def tensors(using Scope): Vector[(String, Arr)] = snaps.zipWithIndex.flatMap((sn, i) => sn.tensors(i))
+    def meta: Map[String, String] = snaps.zipWithIndex.flatMap((sn, i) => sn.meta(i)).toMap
+  def snapshotOf(tensors: Map[String, Arr], meta: Map[String, String], owner: Scope): Model.Snapshot =
+    Snapshot(Vector.tabulate(layers)(i => KvCache.snapOf(i, tensors, meta, kvHeads, headDim)), owner)
   def newState(): State = State(Vector.fill(layers)(KvCache(kvHeads, headDim)))
   def restore(snapshot: Model.Snapshot): State =
     val st = newState()

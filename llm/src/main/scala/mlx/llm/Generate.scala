@@ -11,9 +11,10 @@ final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, deco
   def decodePerSecond: Double = if tokens <= 1 then 0 else (tokens - 1) / (decodeNanos / 1e9)
 
 /** A GENERATION, a token at a time: the prompt in one pass, then a step a token — each next step built and started
- * on the GPU before the last one's token is read, so the CPU's work overlaps the GPU's. Greedy */
+ * on the GPU before the last one's token is read, so the CPU's work overlaps the GPU's. Each token chosen as
+ * `sampling` says (greedy by default) */
 final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean,
-    cache: PrefixCache | Null = null, marks: Seq[Int] = Nil):
+    cache: PrefixCache | Null = null, marks: Seq[Int] = Nil, sampling: Sampling = Sampling.Greedy):
   private var state: Model.State | Null = null
   private var cached = 0
   private val carry = new Scope
@@ -26,7 +27,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   private var stopped = false
 
   private def step(input: Arr): Arr = Scope(carry) {
-    Mlx.reshape(Mlx.argmax(model.logits(input, state.nn), -1), 1, 1).evalAsync()
+    sampling.pick(model.logits(input, state.nn)).evalAsync()
   }
 
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
@@ -34,6 +35,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     if finished then None
     else
       if y == null then
+        sampling.seed.foreach(Mlx.randomSeed)
         // from the longest prefix a cache keeps, if any; then the prompt but its last token in chunks, the state
         // evaluated after each (memory bounded), a snapshot kept at each mark; the last token the first step — as
         // mlx_lm's generate_step, so without a cache the numbers are its numbers
@@ -47,7 +49,8 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
           val m = math.min(math.min(Session.chunk, prompt.length - at - 1), next - at)
           Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
           at += m
-          if at == next && cache != null then cache.nn.add(prompt.take(at), state.nn.snapshot())
+          if at == next && cache != null then
+            cache.nn.add(prompt.take(at), state.nn.snapshot(), durable = marks.headOption.contains(at))
         val input = Scope(carry)(Mlx.ints(prompt.drop(at), 1, prompt.length - at))
         y = step(input)
         carry.release(input)

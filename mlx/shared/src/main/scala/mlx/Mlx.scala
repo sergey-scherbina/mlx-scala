@@ -127,6 +127,16 @@ object Mlx:
       sorted: Boolean = false)(using s: Scope): Arr =
     s.own(Okm.gatherQmm(x.h, w.h, scales.h, biases.h, indices.h, transpose, groupSize, bits, sorted))
 
+  // sampling
+  def cumsum(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.cumsum(a.h, axis))
+  def greater(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.greater(a.h, b.h))
+  /** `a` where `cond`, else `b` */
+  def where(cond: Arr, a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.where(cond.h, a.h, b.h))
+  /** an index drawn along `axis`, each with the probability softmax(logits) gives it */
+  def categorical(logits: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.categorical(logits.h, axis))
+  /** the random generator's seed: the draws after it the same each run */
+  def randomSeed(seed: Long): Unit = check(Okm.randomSeed(seed))
+
   /** x · wᵀ (`transpose`) with w quantized: packed weights, a scale and a bias per group */
   def quantizedMatmul(x: Arr, w: Arr, scales: Arr, biases: Arr, transpose: Boolean, groupSize: Int, bits: Int)(
     using s: Scope): Arr = s.own(Okm.quantizedMatmul(x.h, w.h, scales.h, biases.h, transpose, groupSize, bits))
@@ -141,6 +151,11 @@ object Mlx:
   /** softmax(q·kᵀ·scale)·v over [batch, heads, length, head_dim]; the causal mask when asked */
   def attention(q: Arr, k: Arr, v: Arr, scale: Float, causal: Boolean)(using s: Scope): Arr =
     s.own(Okm.sdpa(q.h, k.h, v.h, scale, causal))
+
+  /** arrays into a .safetensors file, by name, with string metadata */
+  def saveSafetensors(path: String, arrays: Seq[(String, Arr)], metadata: Map[String, String] = Map.empty): Unit =
+    check(Okm.saveSafetensors(path, arrays.map(_._1).toArray, arrays.map(_._2.h).toArray, metadata.keys.toArray,
+      metadata.values.toArray))
 
   /** the null array: an optional argument not given (a norm without a weight) */
   val none: Arr = Arr(0L, null)
