@@ -20,7 +20,8 @@ object Qwen35Config:
     val q = json("quantization")
     val overrides = q.record.collect { case (k, o: Json.Obj) => k -> (o("group_size").int, o("bits").int) }.toMap
     val headDim = t("head_dim").int
-    val partial = rope.field("partial_rotary_factor").orElse(t.field("partial_rotary_factor")).map(_.double).getOrElse(0.25)
+    val partial = rope.field("partial_rotary_factor").orElse(t.field("partial_rotary_factor")).map(_.double)
+      .getOrElse(0.25)
     Qwen35Config(t("hidden_size").int, t("num_hidden_layers").int, t("num_attention_heads").int,
       t("num_key_value_heads").int, headDim, (headDim * partial).toInt,
       rope.field("rope_theta").orElse(t.field("rope_theta")).map(_.double).getOrElse(1e7).toFloat,
