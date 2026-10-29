@@ -5,11 +5,23 @@ import scala.scalanative.build.*
 
 ThisBuild / scalaVersion := "3.3.8"
 ThisBuild / organization := "io.github.sergey-scherbina"
-ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.0"
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/sergey-scherbina/mlx-scala"))
 ThisBuild / resolvers += "okay-simple" at "https://okay-effects.github.io/okay-simple/maven"
+ThisBuild / developers := List(Developer("sergey-scherbina", "Sergiy Shcherbyna", "sergey.scherbina@gmail.com",
+  url("https://github.com/sergey-scherbina")))
+ThisBuild / scmInfo := Some(ScmInfo(url("https://github.com/sergey-scherbina/mlx-scala"),
+  "scm:git:https://github.com/sergey-scherbina/mlx-scala.git"))
+ThisBuild / versionScheme := Some("early-semver")
+
+/** RELEASES, ON GITHUB PAGES: `sbt publish` writes the Maven repository into target/pages-maven, which goes to the
+ * gh-pages branch under maven/ — https://sergey-scherbina.github.io/mlx-scala/maven */
+val pagesRepository = settingKey[File]("the Maven repository a release is written to, for GitHub Pages")
+ThisBuild / pagesRepository := (ThisBuild / baseDirectory).value / "target" / "pages-maven"
+ThisBuild / publishTo := Some(MavenCache("pages", (ThisBuild / pagesRepository).value))
+ThisBuild / Compile / packageDoc / publishArtifact := false
 
 /** native-lib/build.sh writes the libraries here: libokm (the flat layer), libmlxc, libmlx, mlx.metallib */
 val nativeLib = file("native-lib/out/lib").getAbsoluteFile

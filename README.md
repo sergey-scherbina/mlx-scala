@@ -9,6 +9,24 @@ native-lib/build.sh                                   # mlx-c (MLX v0.32.4) and 
 sbt test                                              # the JVM and Scala Native
 ```
 
+## Get it
+
+```scala
+// build.sbt
+resolvers ++= Seq("mlx-scala" at "https://sergey-scherbina.github.io/mlx-scala/maven",
+  "okay-simple" at "https://okay-effects.github.io/okay-simple/maven")       // its JSON
+libraryDependencies += "io.github.sergey-scherbina" %%% "mlx-scala-llm" % "0.1.0"  // or "mlx-scala": the MLX API alone
+```
+
+The native libraries — `libokm` (the flat layer), `libmlxc`, `libmlx`, `mlx.metallib` — from the
+[release](https://github.com/sergey-scherbina/mlx-scala/releases/tag/v0.1.0) (Apple Silicon, built on macOS 27), or
+built: `native-lib/build.sh` (mlx-c v0.8.0, MLX v0.32.4). Then:
+
+- the JVM (Java 22+): `--enable-native-access=ALL-UNNAMED` and `MLX_SCALA_LIB=<their directory>` (or
+  `-Dokm.lib=<…>/libokm.dylib`);
+- Scala Native: `nativeConfig ~= (_.withEmbedResources(true).withLinkingOptions(Seq("-L<dir>", "-lmlxc",
+  "-Wl,-rpath,<dir>")))`.
+
 ## How it is built
 
 | module | what | depends on |
