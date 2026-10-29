@@ -8,7 +8,7 @@ import mlx.Mlx.*
   val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit").get
   val model = Qwen3.load(dir)
   for n <- if sizes.isEmpty then Seq(512, 1024, 2048, 4096) else sizes do
-    val cache = model.newCache()
+    val cache = model.newState()
     val s = new Scope
     given Scope = s
     val ids = ints(Array.fill(n)(1000 + util.Random.nextInt(5000)), 1, n)
@@ -25,4 +25,4 @@ import mlx.Mlx.*
     println(f"n=$n%5d prefill ${(t1 - t0) / 1e6}%8.1f ms (${n / ((t1 - t0) / 1e9)}%6.0f tok/s)  decode " +
       f"${32 / ((d1 - d0) / 1e9)}%6.1f tok/s  peak ${Mlx.peakMemory / 1e9}%.1f GB  live arrays ${s.size}")
     s.close()
-    cache.foreach(_.close())
+    cache.close()

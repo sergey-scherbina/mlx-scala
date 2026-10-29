@@ -67,7 +67,7 @@ final class KvCache(kvHeads: Int, headDim: Int):
 
 /** QWEN3: a decoder of `layers` blocks — attention with GQA and q/k RMS norms, RoPE; a SwiGLU MLP — over quantized
  * weights; the embedding is the output layer too (tied) */
-final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], own: Scope):
+final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], own: Scope) extends Model:
   import config.*
   private def w(name: String): Arr = weights.getOrElse(name, sys.error(s"no weight $name"))
   private def lin(prefix: String) =
@@ -92,7 +92,11 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   private val norm = w("model.norm.weight")
   private val scale = (1.0 / math.sqrt(headDim)).toFloat
 
-  def newCache(): Vector[KvCache] = Vector.fill(layers)(KvCache(kvHeads, headDim))
+  /** a KV cache a layer */
+  final class State(val caches: Vector[KvCache]) extends Model.State:
+    def close(): Unit = caches.foreach(_.close())
+  def newState(): State = State(Vector.fill(layers)(KvCache(kvHeads, headDim)))
+  def logits(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state.asInstanceOf[State].caches)
 
   private def attention(l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =
     val offset = cache.offset

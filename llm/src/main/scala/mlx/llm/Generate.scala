@@ -9,33 +9,65 @@ final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, deco
   def prefillPerSecond: Double = promptTokens / (prefillNanos / 1e9)
   def decodePerSecond: Double = if tokens <= 1 then 0 else (tokens - 1) / (decodeNanos / 1e9)
 
-/** GREEDY GENERATION: the prompt in one pass, then a token at a time — each next step built and started on the GPU
- * before the last one's token is read, so the CPU's work overlaps the GPU's */
-object Generate:
-  def greedy(model: Qwen3, prompt: Array[Int], maxTokens: Int, stop: Int => Boolean)(emit: Int => Unit): Timing =
-    val cache = model.newCache()
-    val carry = new Scope
-    def step(input: Arr): Arr = Scope(carry) {
-      reshape(argmax(model.logits(input, cache), -1), 1, 1).evalAsync()
-    }
-    val t0 = System.nanoTime()
-    val input = Scope(carry)(ints(prompt, 1, prompt.length))
-    var y = step(input)
-    carry.release(input)
-    var first = y.itemInt
-    val t1 = System.nanoTime()
-    var made = 1
-    emit(first)
-    var done = stop(first) || made >= maxTokens
-    while !done do
-      val next = step(y)
-      carry.release(y)
-      y = next
-      first = y.itemInt
+/** A GENERATION, a token at a time: the prompt in one pass, then a step a token — each next step built and started
+ * on the GPU before the last one's token is read, so the CPU's work overlaps the GPU's. Greedy */
+final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean):
+  private val state = model.newState()
+  private val carry = new Scope
+  private val t0 = System.nanoTime()
+  private var firstAt = 0L
+  private var endAt = 0L
+  private var y: Arr | Null = null
+  private var made = 0
+  private var finished = false
+  private var stopped = false
+
+  private def step(input: Arr): Arr = Scope(carry) {
+    Mlx.reshape(Mlx.argmax(model.logits(input, state), -1), 1, 1).evalAsync()
+  }
+
+  /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
+  def next(): Option[Int] =
+    if finished then None
+    else
+      if y == null then
+        val input = Scope(carry)(Mlx.ints(prompt, 1, prompt.length))
+        y = step(input)
+        carry.release(input)
+      val current = y.nn
+      val token = current.itemInt
+      if made == 0 then firstAt = System.nanoTime()
       made += 1
-      emit(first)
-      done = stop(first) || made >= maxTokens
-    val t2 = System.nanoTime()
+      if stops(token) || made >= maxTokens then
+        endAt = System.nanoTime()
+        finished = true
+        stopped = stops(token)
+        close()
+        if stopped then None else Some(token)
+      else
+        y = step(current)                 // the next started before this one is given out
+        carry.release(current)
+        Some(token)
+
+  /** whether it ended at a stop token (else: at `maxTokens`) */
+  def endedByStop: Boolean = stopped
+  def timing: Timing =
+    Timing(prompt.length, firstAt - t0, made, (if endAt == 0 then System.nanoTime() else endAt) - firstAt)
+  def close(): Unit =
+    if endAt == 0 then endAt = System.nanoTime()
+    finished = true
     carry.close()
-    cache.foreach(_.close())
-    Timing(prompt.length, t1 - t0, made, t2 - t1)
+    state.close()
+
+object Generate:
+  /** every token to `emit`, the stop token too; what it measured */
+  def greedy(model: Model, prompt: Array[Int], maxTokens: Int, stop: Int => Boolean)(emit: Int => Unit): Timing =
+    val s = Session(model, prompt, maxTokens, _ => false)
+    var done = false
+    while !done do
+      s.next() match
+        case Some(t) => emit(t); done = stop(t)
+        case None => done = true
+    val t = s.timing
+    s.close()
+    t
