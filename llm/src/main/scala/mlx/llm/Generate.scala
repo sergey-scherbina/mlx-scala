@@ -52,6 +52,9 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         y = step(input)
         carry.release(input)
       val current = y.nn
+      // the next step built and started BEFORE this one is read — as mlx_lm: the graph's building and encoding
+      // overlap the GPU's running this one (read first, they did not: 13% of the decode's speed)
+      val next = if made + 1 < maxTokens then step(current) else null
       val token = current.itemInt
       if made == 0 then firstAt = System.nanoTime()
       made += 1
@@ -62,7 +65,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         close()
         if stopped then None else Some(token)
       else
-        y = step(current)                 // the next started before this one is given out
+        y = next
         carry.release(current)
         Some(token)
 

@@ -80,8 +80,16 @@ object Mlx:
   def multiply(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.multiply(a.h, b.h))
   def matmul(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.matmul(a.h, b.h))
   def sigmoid(a: Arr)(using s: Scope): Arr = s.own(Okm.sigmoid(a.h))
+  // COMPILED (MLX's compile, shapeless): the elementwise functions mlx_lm compiles — the same ops in the same order,
+  // the same numbers, one fused kernel each
   /** x · sigmoid(x) */
-  def silu(a: Arr)(using s: Scope): Arr = multiply(a, sigmoid(a))
+  def silu(a: Arr)(using s: Scope): Arr = s.own(Okm.silu(a.h))
+  /** silu(gate) · x */
+  def swiglu(gate: Arr, x: Arr)(using s: Scope): Arr = s.own(Okm.swiglu(gate.h, x.h))
+  /** (silu(gate) · x) in float32, as `h`'s type */
+  def preciseSwiglu(h: Arr, gate: Arr, x: Arr)(using s: Scope): Arr = s.own(Okm.preciseSwiglu(h.h, gate.h, x.h))
+  /** exp(−exp(A_log) · softplus(a + dt_bias)) in float32: Gated DeltaNet's decay */
+  def computeG(aLog: Arr, a: Arr, dtBias: Arr)(using s: Scope): Arr = s.own(Okm.computeG(aLog.h, a.h, dtBias.h))
   def astype(a: Arr, dtype: Dtype)(using s: Scope): Arr = s.own(Okm.astype(a.h, dtype.ordinal))
   def reshape(a: Arr, shape: Int*)(using s: Scope): Arr = s.own(Okm.reshape(a.h, shape.toArray))
   def transpose(a: Arr, axes: Int*)(using s: Scope): Arr = s.own(Okm.transpose(a.h, axes.toArray))
@@ -153,6 +161,9 @@ object Mlx:
 
   /** all computed now, together */
   def evalAll(as: Seq[Arr]): Unit = check(Okm.evalAll(as.map(_.h).toArray))
+
+  /** the graph that computes `a`, Graphviz text, into a file: what a step is made of (not evaluated) */
+  def exportDot(a: Arr, path: String): Unit = check(Okm.exportDot(a.h, path))
 
   def activeMemory: Long = Okm.activeMemory()
   def peakMemory: Long = Okm.peakMemory()

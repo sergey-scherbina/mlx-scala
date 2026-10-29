@@ -38,6 +38,10 @@ private object C:
     extern
   def okm_dequantize(w: Long, s: Long, b: Long, gs: CInt, bits: CInt): Long = extern
   def okm_subtract(a: Long, b: Long): Long = extern
+  def okm_silu(a: Long): Long = extern
+  def okm_swiglu(gate: Long, x: Long): Long = extern
+  def okm_precise_swiglu(h: Long, gate: Long, x: Long): Long = extern
+  def okm_compute_g(aLog: Long, a: Long, dtBias: Long): Long = extern
   def okm_divide(a: Long, b: Long): Long = extern
   def okm_floor_divide(a: Long, b: Long): Long = extern
   def okm_exp(a: Long): Long = extern
@@ -66,6 +70,7 @@ private object C:
   def okm_load_next(file: Long, key: Ptr[CString], value: Ptr[Long]): CInt = extern
   def okm_load_close(file: Long): Unit = extern
   def okm_active_memory(): Long = extern
+  def okm_export_dot(a: Long, path: CString): CInt = extern
   def okm_peak_memory(): Long = extern
 
 /** THE FLAT LAYER on Scala Native: the same functions as the JVM's `Okm`, called directly; int arrays copied to the
@@ -125,6 +130,10 @@ private[mlx] object Okm:
     C.okm_sdpa(q, k, v, scale, if causal then 1 else 0)
 
   def subtract(a: Long, b: Long): Long = C.okm_subtract(a, b)
+  def silu(a: Long): Long = C.okm_silu(a)
+  def swiglu(gate: Long, x: Long): Long = C.okm_swiglu(gate, x)
+  def preciseSwiglu(h: Long, gate: Long, x: Long): Long = C.okm_precise_swiglu(h, gate, x)
+  def computeG(aLog: Long, a: Long, dtBias: Long): Long = C.okm_compute_g(aLog, a, dtBias)
   def divide(a: Long, b: Long): Long = C.okm_divide(a, b)
   def floorDivide(a: Long, b: Long): Long = C.okm_floor_divide(a, b)
   def exp(a: Long): Long = C.okm_exp(a)
@@ -176,4 +185,5 @@ private[mlx] object Okm:
     if C.okm_load_next(file, key, value) == 0 then null else (fromCString(!key), !value)
   def loadClose(file: Long): Unit = C.okm_load_close(file)
   def activeMemory(): Long = C.okm_active_memory()
+  def exportDot(a: Long, path: String): Int = Zone.acquire(implicit z => C.okm_export_dot(a, toCString(path)))
   def peakMemory(): Long = C.okm_peak_memory()

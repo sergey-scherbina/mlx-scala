@@ -61,6 +61,10 @@ private[mlx] object Okm:
   private val hZeros = fn("okm_zeros", J, J, I, I)
   private val hQmm = fn("okm_quantized_matmul", J, J, J, J, J, I, I, I)
   private val hSubtract = fn("okm_subtract", J, J, J)
+  private val hSilu = fn("okm_silu", J, J)
+  private val hSwiglu = fn("okm_swiglu", J, J, J)
+  private val hPreciseSwiglu = fn("okm_precise_swiglu", J, J, J, J)
+  private val hComputeG = fn("okm_compute_g", J, J, J, J)
   private val hDivide = fn("okm_divide", J, J, J)
   private val hFloorDivide = fn("okm_floor_divide", J, J, J)
   private val hExp = fn("okm_exp", J, J)
@@ -86,6 +90,7 @@ private[mlx] object Okm:
   private val hLoadNext = fn("okm_load_next", I, J, J, J)
   private val hLoadClose = fn("okm_load_close", null, J)
   private val hActive = fn("okm_active_memory", J)
+  private val hExportDot = fn("okm_export_dot", I, J, J)
   private val hPeak = fn("okm_peak_memory", J)
 
   def init(): Int = hInit.invokeExact()
@@ -149,6 +154,10 @@ private[mlx] object Okm:
     hSdpa.invokeExact(q, k, v, scale, if causal then 1 else 0)
 
   def subtract(a: Long, b: Long): Long = hSubtract.invokeExact(a, b)
+  def silu(a: Long): Long = hSilu.invokeExact(a)
+  def swiglu(gate: Long, x: Long): Long = hSwiglu.invokeExact(gate, x)
+  def preciseSwiglu(h: Long, gate: Long, x: Long): Long = hPreciseSwiglu.invokeExact(h, gate, x)
+  def computeG(aLog: Long, a: Long, dtBias: Long): Long = hComputeG.invokeExact(aLog, a, dtBias)
   def divide(a: Long, b: Long): Long = hDivide.invokeExact(a, b)
   def floorDivide(a: Long, b: Long): Long = hFloorDivide.invokeExact(a, b)
   def exp(a: Long): Long = hExp.invokeExact(a)
@@ -213,4 +222,10 @@ private[mlx] object Okm:
       (key, s.get(JAVA_LONG, at + 8))
   def loadClose(file: Long): Unit = hLoadClose.invokeExact(file)
   def activeMemory(): Long = hActive.invokeExact()
+  def exportDot(a: Long, path: String): Int =
+    val arena = Arena.ofConfined()
+    try
+      val r: Int = hExportDot.invokeExact(a, arena.allocateFrom(path).address())
+      r
+    finally arena.close()
   def peakMemory(): Long = hPeak.invokeExact()

@@ -2,6 +2,7 @@
 // no struct by value: an array is its handle (mlx_array's ctx), an op returns the result's handle, NULL on an error
 // (okm_error() then says which). One GPU stream for every op.
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include "mlx/c/mlx.h"
 
@@ -162,6 +163,78 @@ int okm_kernel_apply(void* kernel, void** inputs, int n_in, const int* shapes, c
   return e;
 }
 
+// COMPILED (mlx_compile, shapeless): the elementwise functions mlx_lm compiles, the same ops in the same order — so the
+// same numbers, one fused kernel each instead of two to five
+static mlx_array in_at(const mlx_vector_array in, int i) {
+  mlx_array a = mlx_array_new(); mlx_vector_array_get(&a, in, i); return a;
+}
+static mlx_array weak(float v, mlx_array like) {      // a Python float in an op: the array's own type
+  mlx_array f = mlx_array_new_float(v), r = mlx_array_new();
+  mlx_astype(&r, f, mlx_array_dtype(like), S); mlx_array_free(f); return r;
+}
+static int done(mlx_vector_array* res, mlx_array r) { mlx_vector_array_set_value(res, r); mlx_array_free(r); return 0; }
+
+// silu(x) = x · sigmoid(x)
+static int f_silu(mlx_vector_array* res, const mlx_vector_array in) {
+  mlx_array x = in_at(in, 0), s = mlx_array_new(), r = mlx_array_new();
+  mlx_sigmoid(&s, x, S); mlx_multiply(&r, x, s, S);
+  mlx_array_free(x); mlx_array_free(s); return done(res, r);
+}
+// swiglu(gate, x) = silu(gate) · x
+static int f_swiglu(mlx_vector_array* res, const mlx_vector_array in) {
+  mlx_array g = in_at(in, 0), x = in_at(in, 1), s = mlx_array_new(), a = mlx_array_new(), r = mlx_array_new();
+  mlx_sigmoid(&s, g, S); mlx_multiply(&a, g, s, S); mlx_multiply(&r, a, x, S);
+  mlx_array_free(g); mlx_array_free(x); mlx_array_free(s); mlx_array_free(a); return done(res, r);
+}
+// precise_swiglu(h, gate, x) = (silu(gate as f32) · (x as f32)) as h's type
+static int f_precise_swiglu(mlx_vector_array* res, const mlx_vector_array in) {
+  mlx_array h = in_at(in, 0), g = in_at(in, 1), x = in_at(in, 2);
+  mlx_array g32 = mlx_array_new(), x32 = mlx_array_new(), s = mlx_array_new(), a = mlx_array_new(),
+    p = mlx_array_new(), r = mlx_array_new();
+  mlx_astype(&g32, g, MLX_FLOAT32, S); mlx_sigmoid(&s, g32, S); mlx_multiply(&a, g32, s, S);
+  mlx_astype(&x32, x, MLX_FLOAT32, S); mlx_multiply(&p, a, x32, S); mlx_astype(&r, p, mlx_array_dtype(h), S);
+  mlx_array_free(h); mlx_array_free(g); mlx_array_free(x); mlx_array_free(g32); mlx_array_free(x32);
+  mlx_array_free(s); mlx_array_free(a); mlx_array_free(p); return done(res, r);
+}
+// compute_g(A_log, a, dt_bias) = exp(−exp(A_log as f32) · softplus(a + dt_bias)), softplus(x) = logaddexp(x, 0)
+static int f_compute_g(mlx_vector_array* res, const mlx_vector_array in) {
+  mlx_array al = in_at(in, 0), a = in_at(in, 1), dt = in_at(in, 2);
+  mlx_array al32 = mlx_array_new(), e = mlx_array_new(), ne = mlx_array_new(), sum = mlx_array_new(),
+    sp = mlx_array_new(), m = mlx_array_new(), r = mlx_array_new();
+  mlx_astype(&al32, al, MLX_FLOAT32, S); mlx_exp(&e, al32, S); mlx_negative(&ne, e, S);
+  mlx_add(&sum, a, dt, S);
+  mlx_array zero = weak(0.0f, sum); mlx_logaddexp(&sp, sum, zero, S);
+  mlx_multiply(&m, ne, sp, S); mlx_exp(&r, m, S);
+  mlx_array_free(al); mlx_array_free(a); mlx_array_free(dt); mlx_array_free(al32); mlx_array_free(e);
+  mlx_array_free(ne); mlx_array_free(sum); mlx_array_free(zero); mlx_array_free(sp); mlx_array_free(m);
+  return done(res, r);
+}
+
+static mlx_closure compiled(int (*f)(mlx_vector_array*, const mlx_vector_array)) {
+  mlx_closure c = mlx_closure_new_func(f), r = mlx_closure_new();
+  mlx_compile(&r, c, true); mlx_closure_free(c); return r;
+}
+static void* apply(mlx_closure* slot, int (*f)(mlx_vector_array*, const mlx_vector_array), void** args, int n) {
+  if (!slot->ctx) *slot = compiled(f);
+  mlx_vector_array in = mlx_vector_array_new();
+  for (int i = 0; i < n; i++) mlx_vector_array_append_value(in, A(args[i]));
+  mlx_vector_array out = mlx_vector_array_new();
+  int e = mlx_closure_apply(&out, *slot, in);
+  mlx_vector_array_free(in);
+  if (e) { mlx_vector_array_free(out); return NULL; }
+  mlx_array r = mlx_array_new(); mlx_vector_array_get(&r, out, 0); mlx_vector_array_free(out);
+  return r.ctx;
+}
+static mlx_closure c_silu, c_swiglu, c_precise, c_g;
+void* okm_silu(void* x) { return apply(&c_silu, f_silu, (void*[]){x}, 1); }
+void* okm_swiglu(void* gate, void* x) { return apply(&c_swiglu, f_swiglu, (void*[]){gate, x}, 2); }
+void* okm_precise_swiglu(void* h, void* gate, void* x) {
+  return apply(&c_precise, f_precise_swiglu, (void*[]){h, gate, x}, 3);
+}
+void* okm_compute_g(void* a_log, void* a, void* dt_bias) {
+  return apply(&c_g, f_compute_g, (void*[]){a_log, a, dt_bias}, 3);
+}
+
 // safetensors: opened, walked name by name, closed
 typedef struct {
   mlx_map_string_to_array m; mlx_map_string_to_string meta; mlx_map_string_to_array_iterator it;
@@ -183,6 +256,15 @@ int okm_load_next(void* file, const char** key, void** value) {
 void okm_load_close(void* file) {
   okm_file* f = file; mlx_map_string_to_array_iterator_free(f->it); mlx_map_string_to_array_free(f->m);
   mlx_map_string_to_string_free(f->meta); free(f);
+}
+
+// the graph that computes an array, as Graphviz text, to a file: what a step is made of
+int okm_export_dot(void* a, const char* path) {
+  FILE* f = fopen(path, "w"); if (!f) return 1;
+  mlx_node_namer namer = mlx_node_namer_new();
+  mlx_vector_array v = mlx_vector_array_new_data((mlx_array[]){A(a)}, 1);
+  int e = mlx_export_to_dot(f, namer, v);
+  mlx_vector_array_free(v); mlx_node_namer_free(namer); fclose(f); return e;
 }
 
 // memory

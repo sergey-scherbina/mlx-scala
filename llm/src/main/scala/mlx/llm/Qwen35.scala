@@ -79,7 +79,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     private def glu(x: Arr, idx: Arr, sorted: Boolean)(using Scope) =
       def at(t: (Arr, Arr, Arr, Int, Int), v: Arr) = gatherQmm(v, t._1, t._2, t._3, idx, transpose = true, t._4,
         t._5, sorted)
-      at(down, multiply(silu(at(gate, x)), at(up, x)))
+      at(down, swiglu(at(gate, x), at(up, x)))
     /** x [1, n, 1, 1, D], idx [1, n, k]: [1, n, k, D]. With many rows (n·k ≥ 64) they go sorted by expert, each
      * expert's weights read once — mlx_lm's `_gather_sort` */
     def run(x: Arr, idx: Arr)(using Scope): Arr =
@@ -169,12 +169,21 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     val a = Mlx.attention(qs, keys, values, (1.0 / math.sqrt(headDim)).toFloat, causal = n > 1)
     l.o(multiply(reshape(transpose(a, 0, 2, 1, 3), 1, n, heads * headDim), sigmoid(gate)))
 
+  private val inv = (1.0 / math.sqrt(linearKeyDim)).toFloat
+  /** the readout scales inv² and inv at an array type, made once: an `astype` a step is a kernel a step */
+  private val scaleCache = scala.collection.mutable.HashMap.empty[Dtype, (Arr, Arr)]
+  private def scales(dt: Dtype): (Arr, Arr) = scaleCache.getOrElseUpdate(dt, {
+    given Scope = own
+    val pair = (astype(scalar(inv * inv), dt).eval(), astype(scalar(inv), dt).eval())
+    pair
+  })
+
   private def linearAttention(l: Layer, x: Arr, n: Int, st: LinearState)(using Scope): Arr =
     val qkv = l.qkv(x)
     val z = reshape(l.z(x), 1, n, linearValueHeads, linearValueDim)
     val beta = sigmoid(l.b(x))
     // g = exp(-exp(A_log) · softplus(a + dt_bias)), in float32
-    val g = exp(negative(multiply(exp(astype(l.aLog, Dtype.Float32)), softplus(add(l.a(x), l.dtBias)))))
+    val g = computeG(l.aLog, l.a(x), l.dtBias)
     val past = if st.conv == null then zeros(Seq(1, convKernel - 1, convDim), x.dtype) else st.conv.nn
     val input = concatenate(Seq(past, qkv), 1)
     val keep = contiguous(slice(input, Seq(0, n, 0), Seq(1, n + convKernel - 1, convDim)))
@@ -182,10 +191,10 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     def part(from: Int, to: Int, h: Int, d: Int) = reshape(slice(conv, Seq(0, 0, from), Seq(1, n, to)), 1, n, h, d)
     // q and k L2-normalized, the readout scale folded into q; a scale is of the array's type (as Python's float is
     // to MLX: 128^-0.5 in bf16 is 0.0883789, not 0.0883883)
-    val inv = (1.0 / math.sqrt(linearKeyDim)).toFloat
-    def scaled(t: Arr, c: Float) = multiply(rmsNorm(t, Mlx.none, 1e-6f * inv * inv), astype(scalar(c), t.dtype))
-    val q = scaled(part(0, keyDim, linearKeyHeads, linearKeyDim), inv * inv)
-    val k = scaled(part(keyDim, 2 * keyDim, linearKeyHeads, linearKeyDim), inv)
+    val (invSq, invOne) = scales(x.dtype)
+    def scaled(t: Arr, c: Arr) = multiply(rmsNorm(t, Mlx.none, 1e-6f * inv * inv), c)
+    val q = scaled(part(0, keyDim, linearKeyHeads, linearKeyDim), invSq)
+    val k = scaled(part(keyDim, 2 * keyDim, linearKeyHeads, linearKeyDim), invOne)
     val v = part(2 * keyDim, convDim, linearValueHeads, linearValueDim)
     val state = if st.state == null then zeros(Seq(1, linearValueHeads, linearValueDim, linearKeyDim), Dtype.Float32)
       else st.state.nn
@@ -200,12 +209,11 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       "Hk" -> linearKeyHeads, "Hv" -> linearValueHeads)): @unchecked
     st.keep(keep, next)
     // the gated RMS norm: silu(z) · norm(y), in float32
-    val normed = rmsNorm(y, l.gNorm, eps)
-    val gated = astype(multiply(silu(astype(z, Dtype.Float32)), astype(normed, Dtype.Float32)), y.dtype)
+    val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
     l.out(reshape(gated, 1, n, valueDim))
 
   private def mlp(l: Layer, x: Arr, n: Int)(using Scope): Arr =
-    if experts == 0 then l.down(multiply(silu(l.gate(x)), l.up(x)))
+    if experts == 0 then l.down(swiglu(l.gate(x), l.up(x)))
     else
       val gates = softmax(l.router(x), -1)
       val inds = slice(argpartition(gates, experts - expertsPerToken, -1), Seq(0, 0, experts - expertsPerToken),
@@ -214,7 +222,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       val scores = if normTopK then divide(s0, sum(s0, -1, keepdims = true)) else s0
       val y = l.experts.run(expandDims(expandDims(x, -2), -2), inds)
       val mixed = sum(multiply(y, expandDims(astype(scores, y.dtype), -1)), -2)
-      val shared = l.sharedDown(multiply(silu(l.sharedGate(x)), l.sharedUp(x)))
+      val shared = l.sharedDown(swiglu(l.sharedGate(x), l.sharedUp(x)))
       add(mixed, multiply(sigmoid(l.sharedRouter(x)), shared))
 
   /** each layer in a scope of its own, its output alone moved out (a handle held keeps its buffer) */
