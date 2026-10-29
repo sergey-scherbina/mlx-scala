@@ -19,4 +19,5 @@ object Model:
   def load(dir: Path): Model =
     Json.parse(Files.readString(dir.resolve("config.json")))("model_type").str match
       case "qwen3" => Qwen3.load(dir)
+      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir)
       case other => sys.error(s"a model type not supported: $other")

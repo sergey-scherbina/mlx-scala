@@ -31,7 +31,14 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     if finished then None
     else
       if y == null then
-        val input = Scope(carry)(Mlx.ints(prompt, 1, prompt.length))
+        // the prompt but its last token in chunks, the state evaluated after each (memory bounded); the last token
+        // the first step — as mlx_lm's generate_step, so the numbers are its numbers
+        var at = 0
+        while prompt.length - at > 1 do
+          val m = math.min(Session.chunk, prompt.length - at - 1)
+          Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state).eval())
+          at += m
+        val input = Scope(carry)(Mlx.ints(prompt.drop(at), 1, prompt.length - at))
         y = step(input)
         carry.release(input)
       val current = y.nn
@@ -58,6 +65,10 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     finished = true
     carry.close()
     state.close()
+
+object Session:
+  /** a prompt's tokens a pass */
+  val chunk = 2048
 
 object Generate:
   /** every token to `emit`, the stop token too; what it measured */

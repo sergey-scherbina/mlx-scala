@@ -59,6 +59,24 @@ private[mlx] object Okm:
   private val hConcatenate = fn("okm_concatenate", J, J, I, I)
   private val hZeros = fn("okm_zeros", J, J, I, I)
   private val hQmm = fn("okm_quantized_matmul", J, J, J, J, J, I, I, I)
+  private val hSubtract = fn("okm_subtract", J, J, J)
+  private val hDivide = fn("okm_divide", J, J, J)
+  private val hFloorDivide = fn("okm_floor_divide", J, J, J)
+  private val hExp = fn("okm_exp", J, J)
+  private val hNegative = fn("okm_negative", J, J)
+  private val hLogaddexp = fn("okm_logaddexp", J, J, J)
+  private val hContiguous = fn("okm_contiguous", J, J)
+  private val hSum = fn("okm_sum", J, J, I, I)
+  private val hExpandDims = fn("okm_expand_dims", J, J, I)
+  private val hSqueeze = fn("okm_squeeze", J, J, I)
+  private val hArgpartition = fn("okm_argpartition", J, J, I, I)
+  private val hArgsort = fn("okm_argsort", J, J, I)
+  private val hTakeAlong = fn("okm_take_along", J, J, J, I)
+  private val hConv1d = fn("okm_conv1d", J, J, J, I, I, I, I)
+  private val hScalarI32 = fn("okm_scalar_i32", J, I)
+  private val hGatherQmm = fn("okm_gather_qmm", J, J, J, J, J, J, I, I, I, I)
+  private val hKernelNew = fn("okm_kernel_new", J, J, J, I, J, I, J, J)
+  private val hKernelApply = fn("okm_kernel_apply", I, J, J, I, J, J, J, I, J, J, J, J, J, I, J)
   private val hDequantize = fn("okm_dequantize", J, J, J, J, I, I)
   private val hRmsNorm = fn("okm_rms_norm", J, J, J, F)
   private val hRope = fn("okm_rope", J, J, I, I, F, F, I)
@@ -127,6 +145,53 @@ private[mlx] object Okm:
     hRope.invokeExact(x, dims, if traditional then 1 else 0, base, scale, offset)
   def sdpa(q: Long, k: Long, v: Long, scale: Float, causal: Boolean): Long =
     hSdpa.invokeExact(q, k, v, scale, if causal then 1 else 0)
+
+  def subtract(a: Long, b: Long): Long = hSubtract.invokeExact(a, b)
+  def divide(a: Long, b: Long): Long = hDivide.invokeExact(a, b)
+  def floorDivide(a: Long, b: Long): Long = hFloorDivide.invokeExact(a, b)
+  def exp(a: Long): Long = hExp.invokeExact(a)
+  def negative(a: Long): Long = hNegative.invokeExact(a)
+  def logaddexp(a: Long, b: Long): Long = hLogaddexp.invokeExact(a, b)
+  def contiguous(a: Long): Long = hContiguous.invokeExact(a)
+  def sum(a: Long, axis: Int, keepdims: Boolean): Long = hSum.invokeExact(a, axis, if keepdims then 1 else 0)
+  def expandDims(a: Long, axis: Int): Long = hExpandDims.invokeExact(a, axis)
+  def squeeze(a: Long, axis: Int): Long = hSqueeze.invokeExact(a, axis)
+  def argpartition(a: Long, kth: Int, axis: Int): Long = hArgpartition.invokeExact(a, kth, axis)
+  def argsort(a: Long, axis: Int): Long = hArgsort.invokeExact(a, axis)
+  def takeAlong(a: Long, idx: Long, axis: Int): Long = hTakeAlong.invokeExact(a, idx, axis)
+  def conv1d(x: Long, w: Long, stride: Int, padding: Int, dilation: Int, groups: Int): Long =
+    hConv1d.invokeExact(x, w, stride, padding, dilation, groups)
+  def scalarI32(v: Int): Long = hScalarI32.invokeExact(v)
+  def gatherQmm(x: Long, w: Long, scales: Long, biases: Long, rhs: Long, transpose: Boolean, groupSize: Int,
+      bits: Int, sorted: Boolean): Long =
+    val (t, so) = (if transpose then 1 else 0, if sorted then 1 else 0)
+    hGatherQmm.invokeExact(x, w, scales, biases, rhs, t, groupSize, bits, so)
+
+  private def strings(arena: Arena, xs: Array[String]): MemorySegment =
+    val p = arena.allocate(JAVA_LONG, xs.length.max(1).toLong)
+    for (x, i) <- xs.zipWithIndex do p.setAtIndex(JAVA_LONG, i.toLong, arena.allocateFrom(x).address())
+    p
+  def kernelNew(name: String, inputs: Array[String], outputs: Array[String], source: String, header: String): Long =
+    val arena = Arena.ofConfined()
+    try
+      val r: Long = hKernelNew.invokeExact(arena.allocateFrom(name).address(), strings(arena, inputs).address(),
+        inputs.length, strings(arena, outputs).address(), outputs.length, arena.allocateFrom(source).address(),
+        arena.allocateFrom(header).address())
+      r
+    finally arena.close()
+  def kernelApply(kernel: Long, inputs: Array[Long], shapes: Array[Int], ndims: Array[Int], dtypes: Array[Int],
+      grid: Array[Int], group: Array[Int], tNames: Array[String], tKinds: Array[Int], tValues: Array[Int])
+      : Array[Long] =
+    val arena = Arena.ofConfined()
+    try
+      def ints(xs: Array[Int]) = arena.allocateFrom(JAVA_INT, (if xs.isEmpty then Array(0) else xs)*).address()
+      val outs = arena.allocate(JAVA_LONG, ndims.length.max(1).toLong)
+      val in = arena.allocateFrom(JAVA_LONG, inputs*)
+      val e: Int = hKernelApply.invokeExact(kernel, in.address(), inputs.length, ints(shapes), ints(ndims),
+        ints(dtypes), ndims.length, ints(grid), ints(group), strings(arena, tNames).address(), ints(tKinds),
+        ints(tValues), tNames.length, outs.address())
+      if e != 0 then Array.empty else Array.tabulate(ndims.length)(i => outs.getAtIndex(JAVA_LONG, i.toLong))
+    finally arena.close()
 
   def loadOpen(path: String): Long =
     val arena = Arena.ofConfined()

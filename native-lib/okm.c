@@ -75,6 +75,24 @@ void* okm_concatenate(void** as, int n, int axis) {
 }
 void* okm_zeros(const int* shape, int n, int dtype) { RET(mlx_zeros(&r, shape, n, (mlx_dtype)dtype, S)); }
 
+void* okm_subtract(void* a, void* b) { RET(mlx_subtract(&r, A(a), A(b), S)); }
+void* okm_divide(void* a, void* b) { RET(mlx_divide(&r, A(a), A(b), S)); }
+void* okm_floor_divide(void* a, void* b) { RET(mlx_floor_divide(&r, A(a), A(b), S)); }
+void* okm_exp(void* a) { RET(mlx_exp(&r, A(a), S)); }
+void* okm_negative(void* a) { RET(mlx_negative(&r, A(a), S)); }
+void* okm_logaddexp(void* a, void* b) { RET(mlx_logaddexp(&r, A(a), A(b), S)); }
+void* okm_contiguous(void* a) { RET(mlx_contiguous(&r, A(a), false, S)); }
+void* okm_sum(void* a, int axis, int keepdims) { RET(mlx_sum_axis(&r, A(a), axis, keepdims, S)); }
+void* okm_expand_dims(void* a, int axis) { RET(mlx_expand_dims(&r, A(a), axis, S)); }
+void* okm_squeeze(void* a, int axis) { RET(mlx_squeeze_axis(&r, A(a), axis, S)); }
+void* okm_argpartition(void* a, int kth, int axis) { RET(mlx_argpartition_axis(&r, A(a), kth, axis, S)); }
+void* okm_argsort(void* a, int axis) { RET(mlx_argsort_axis(&r, A(a), axis, S)); }
+void* okm_take_along(void* a, void* idx, int axis) { RET(mlx_take_along_axis(&r, A(a), A(idx), axis, S)); }
+void* okm_conv1d(void* x, void* w, int stride, int padding, int dilation, int groups) {
+  RET(mlx_conv1d(&r, A(x), A(w), stride, padding, dilation, groups, S));
+}
+void* okm_scalar_i32(int v) { return mlx_array_new_int(v).ctx; }
+
 // quantized: `bits` and `group_size` of the affine mode
 void* okm_quantized_matmul(void* x, void* w, void* scales, void* biases, int transpose, int group_size, int bits) {
   RET(mlx_quantized_matmul(&r, A(x), A(w), A(scales), A(biases), transpose, oi(group_size), oi(bits), "affine", S));
@@ -82,6 +100,13 @@ void* okm_quantized_matmul(void* x, void* w, void* scales, void* biases, int tra
 void* okm_dequantize(void* w, void* scales, void* biases, int group_size, int bits) {
   RET(mlx_dequantize(&r, A(w), A(scales), A(biases), oi(group_size), oi(bits), "affine", (mlx_array){0},
     (mlx_optional_dtype){.has_value = false}, S));
+}
+
+// rows of quantized experts by index: x [.., 1, D] · w[idx]ᵀ
+void* okm_gather_qmm(void* x, void* w, void* scales, void* biases, void* rhs, int transpose, int group_size, int bits,
+    int sorted) {
+  RET(mlx_gather_qmm(&r, A(x), A(w), A(scales), A(biases), (mlx_array){0}, A(rhs), transpose, oi(group_size),
+    oi(bits), "affine", (mlx_array){0}, sorted, S));
 }
 
 // fast
@@ -94,6 +119,45 @@ void* okm_rope(void* x, int dims, int traditional, float base, float scale, int 
 void* okm_sdpa(void* q, void* k, void* v, float scale, int causal) {
   RET(mlx_fast_scaled_dot_product_attention(&r, A(q), A(k), A(v), scale, causal ? "causal" : "", (mlx_array){0},
     (mlx_array){0}, false, S));
+}
+
+// a custom Metal kernel: made once, applied with its outputs' shapes and types, its grid, its template arguments
+// (kind 0: an int, 1: a dtype, 2: a bool)
+void* okm_kernel_new(const char* name, const char** inputs, int n_in, const char** outputs, int n_out,
+    const char* source, const char* header) {
+  mlx_vector_string in = mlx_vector_string_new(), out = mlx_vector_string_new();
+  for (int i = 0; i < n_in; i++) mlx_vector_string_append_value(in, inputs[i]);
+  for (int i = 0; i < n_out; i++) mlx_vector_string_append_value(out, outputs[i]);
+  mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new(name, in, out, source, header, true, false);
+  mlx_vector_string_free(in); mlx_vector_string_free(out);
+  return k.ctx;
+}
+int okm_kernel_apply(void* kernel, void** inputs, int n_in, const int* shapes, const int* ndims, const int* dtypes,
+    int n_out, const int* grid, const int* group, const char** t_names, const int* t_kinds, const int* t_values,
+    int n_t, void** outs) {
+  mlx_fast_metal_kernel_config c = mlx_fast_metal_kernel_config_new();
+  const int* sh = shapes;
+  for (int i = 0; i < n_out; i++) {
+    mlx_fast_metal_kernel_config_add_output_arg(c, sh, ndims[i], dtypes[i]);
+    sh += ndims[i];
+  }
+  mlx_fast_metal_kernel_config_set_grid(c, grid[0], grid[1], grid[2]);
+  mlx_fast_metal_kernel_config_set_thread_group(c, group[0], group[1], group[2]);
+  for (int i = 0; i < n_t; i++) {
+    if (t_kinds[i] == 0) mlx_fast_metal_kernel_config_add_template_arg_int(c, t_names[i], t_values[i]);
+    else if (t_kinds[i] == 1) mlx_fast_metal_kernel_config_add_template_arg_dtype(c, t_names[i], t_values[i]);
+    else mlx_fast_metal_kernel_config_add_template_arg_bool(c, t_names[i], t_values[i] != 0);
+  }
+  mlx_vector_array in = mlx_vector_array_new();
+  for (int i = 0; i < n_in; i++) mlx_vector_array_append_value(in, A(inputs[i]));
+  mlx_vector_array res = mlx_vector_array_new();
+  mlx_fast_metal_kernel k = {.ctx = kernel};
+  int e = mlx_fast_metal_kernel_apply(&res, k, in, c, S);
+  if (!e) for (int i = 0; i < n_out; i++) {
+    mlx_array a = mlx_array_new(); mlx_vector_array_get(&a, res, i); outs[i] = a.ctx;
+  }
+  mlx_vector_array_free(in); mlx_vector_array_free(res); mlx_fast_metal_kernel_config_free(c);
+  return e;
 }
 
 // safetensors: opened, walked name by name, closed

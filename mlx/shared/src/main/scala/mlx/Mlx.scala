@@ -91,6 +91,31 @@ object Mlx:
     s.own(Okm.sliceUpdate(src.h, update.h, start.toArray, stop.toArray))
   def concatenate(as: Seq[Arr], axis: Int)(using s: Scope): Arr = s.own(Okm.concatenate(as.map(_.h).toArray, axis))
 
+  def subtract(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.subtract(a.h, b.h))
+  def divide(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.divide(a.h, b.h))
+  def floorDivide(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.floorDivide(a.h, b.h))
+  def exp(a: Arr)(using s: Scope): Arr = s.own(Okm.exp(a.h))
+  def negative(a: Arr)(using s: Scope): Arr = s.own(Okm.negative(a.h))
+  def logaddexp(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.logaddexp(a.h, b.h))
+  /** log(1 + eˣ) */
+  def softplus(a: Arr)(using s: Scope): Arr = logaddexp(a, astype(scalar(0f), a.dtype))
+  def contiguous(a: Arr)(using s: Scope): Arr = s.own(Okm.contiguous(a.h))
+  def sum(a: Arr, axis: Int, keepdims: Boolean = false)(using s: Scope): Arr = s.own(Okm.sum(a.h, axis, keepdims))
+  def expandDims(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.expandDims(a.h, axis))
+  def squeeze(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.squeeze(a.h, axis))
+  def argpartition(a: Arr, kth: Int, axis: Int)(using s: Scope): Arr = s.own(Okm.argpartition(a.h, kth, axis))
+  def argsort(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.argsort(a.h, axis))
+  def takeAlong(a: Arr, indices: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.takeAlong(a.h, indices.h, axis))
+  /** a 1-D convolution: x [batch, length, channels], w [out, kernel, in / groups] */
+  def conv1d(x: Arr, w: Arr, stride: Int = 1, padding: Int = 0, dilation: Int = 1, groups: Int = 1)(
+    using s: Scope): Arr = s.own(Okm.conv1d(x.h, w.h, stride, padding, dilation, groups))
+  def int(v: Int)(using s: Scope): Arr = s.own(Okm.scalarI32(v))
+
+  /** experts' quantized weights by index: x · w[indices]ᵀ — a mixture of experts' layer */
+  def gatherQmm(x: Arr, w: Arr, scales: Arr, biases: Arr, indices: Arr, transpose: Boolean, groupSize: Int, bits: Int,
+      sorted: Boolean = false)(using s: Scope): Arr =
+    s.own(Okm.gatherQmm(x.h, w.h, scales.h, biases.h, indices.h, transpose, groupSize, bits, sorted))
+
   /** x · wᵀ (`transpose`) with w quantized: packed weights, a scale and a bias per group */
   def quantizedMatmul(x: Arr, w: Arr, scales: Arr, biases: Arr, transpose: Boolean, groupSize: Int, bits: Int)(
     using s: Scope): Arr = s.own(Okm.quantizedMatmul(x.h, w.h, scales.h, biases.h, transpose, groupSize, bits))
@@ -98,12 +123,16 @@ object Mlx:
     s.own(Okm.dequantize(w.h, scales.h, biases.h, groupSize, bits))
 
   // MLX's fused kernels
+  /** `weight` may be `none` */
   def rmsNorm(x: Arr, weight: Arr, eps: Float)(using s: Scope): Arr = s.own(Okm.rmsNorm(x.h, weight.h, eps))
   def rope(x: Arr, dims: Int, traditional: Boolean, base: Float, scale: Float, offset: Int)(using s: Scope): Arr =
     s.own(Okm.rope(x.h, dims, traditional, base, scale, offset))
   /** softmax(q·kᵀ·scale)·v over [batch, heads, length, head_dim]; the causal mask when asked */
   def attention(q: Arr, k: Arr, v: Arr, scale: Float, causal: Boolean)(using s: Scope): Arr =
     s.own(Okm.sdpa(q.h, k.h, v.h, scale, causal))
+
+  /** the null array: an optional argument not given (a norm without a weight) */
+  val none: Arr = Arr(0L, null)
 
   /** every tensor of a .safetensors file, by name, in the scope given */
   def loadSafetensors(path: String)(using s: Scope): Map[String, Arr] =
@@ -124,3 +153,20 @@ object Mlx:
 
   def activeMemory: Long = Okm.activeMemory()
   def peakMemory: Long = Okm.peakMemory()
+
+/** A CUSTOM METAL KERNEL: its source, run on arrays — MLX's `fast.metal_kernel`. Applied with its outputs' shapes and
+ * types, the grid and threadgroup, template arguments (ints, dtypes, bools) */
+final class Kernel(name: String, inputs: Seq[String], outputs: Seq[String], source: String, header: String = ""):
+  private lazy val h = Okm.kernelNew(name, inputs.toArray, outputs.toArray, source, header)
+  def apply(args: Seq[Arr], outShapes: Seq[Seq[Int]], outTypes: Seq[Dtype], grid: (Int, Int, Int),
+      group: (Int, Int, Int), template: Seq[(String, Int | Dtype | Boolean)])(using s: Scope): Vector[Arr] =
+    val kinds = template.map(_._2 match { case _: Int => 0; case _: Dtype => 1; case _: Boolean => 2 })
+    val values = template.map(_._2 match
+      case i: Int => i
+      case d: Dtype => d.ordinal
+      case b: Boolean => if b then 1 else 0)
+    val outs = Okm.kernelApply(h, args.map(_.h).toArray, outShapes.flatten.toArray, outShapes.map(_.length).toArray,
+      outTypes.map(_.ordinal).toArray, Array(grid._1, grid._2, grid._3), Array(group._1, group._2, group._3),
+      template.map(_._1).toArray, kinds.toArray, values.toArray)
+    if outs.isEmpty then throw MlxError(Okm.error())
+    outs.toVector.map(s.own)
