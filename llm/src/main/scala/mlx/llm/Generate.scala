@@ -25,9 +25,25 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   private var made = 0
   private var finished = false
   private var stopped = false
+  // with penalties: how often each token was made, and the token ids to count them by — both on the GPU
+  private var counts: Arr | Null = null
+  private var ids: Arr | Null = null
 
   private def step(input: Arr): Arr = Scope(carry) {
-    sampling.pick(model.logits(input, state.nn)).evalAsync()
+    val logits = model.logits(input, state.nn)
+    if !sampling.penalizes then sampling.pick(logits).evalAsync()
+    else
+      val v = logits.dim(-1)
+      if counts == null then
+        counts = zeros(Seq(1, v), Dtype.Float32).moveTo(carry)
+        ids = ints(Array.range(0, v), 1, v).moveTo(carry)
+      val token = sampling.pick(sampling.penalize(astype(reshape(logits, 1, v), Dtype.Float32), counts.nn))
+      val now = Sampling.counted(counts.nn, ids.nn, token).moveTo(carry)
+      carry.release(counts.nn)
+      counts = now
+      token.evalAsync()
+      now.evalAsync()
+      token
   }
 
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */

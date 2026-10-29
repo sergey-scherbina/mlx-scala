@@ -7,9 +7,21 @@ import mlx.Mlx.*
 
 /** HOW A TOKEN IS CHOSEN: greedily (temperature 0), or drawn — from the `topK` likeliest (0: all), of them the
  * smallest set whose probability reaches `topP` (1: all), softmax(logits / temperature). On the GPU: the k by
- * argpartition, sorted, their cumulative probability; a draw among those left. `seed`: the same draws each run */
-final case class Sampling(temperature: Double = 0, topP: Double = 1, topK: Int = 0, seed: Option[Long] = None):
+ * argpartition, sorted, their cumulative probability; a draw among those left. `seed`: the same draws each run.
+ * Penalties as OpenAI's: a token's logit less `presencePenalty` once it has been made, and `frequencyPenalty` for
+ * each time — of the tokens made, not the prompt's; greedy too */
+final case class Sampling(temperature: Double = 0, topP: Double = 1, topK: Int = 0, seed: Option[Long] = None,
+    presencePenalty: Double = 0, frequencyPenalty: Double = 0):
   def greedy: Boolean = temperature <= 0
+  def penalizes: Boolean = presencePenalty != 0 || frequencyPenalty != 0
+
+  /** logits [1, V] (float32) less the penalties, `counts` [1, V] how often each token was made */
+  def penalize(logits: Arr, counts: Arr)(using Scope): Arr =
+    val zero = scalar(0f)
+    val presence =
+      if presencePenalty == 0 then logits
+      else subtract(logits, where(greater(counts, zero), scalar(presencePenalty.toFloat), zero))
+    if frequencyPenalty == 0 then presence else subtract(presence, multiply(counts, scalar(frequencyPenalty.toFloat)))
 
   /** the next token of logits [1, 1, V] (or [1, V]): [1, 1] */
   def pick(logits: Arr)(using Scope): Arr =
@@ -43,6 +55,13 @@ final case class Sampling(temperature: Double = 0, topP: Double = 1, topK: Int =
 
 object Sampling:
   val Greedy: Sampling = Sampling()
+
+  /** `counts` [1, V] with `token` [1, 1] made once more — on the GPU (`ids` [1, V]: 0 until V), so a step is built
+   * before the last one's token is read */
+  def counted(counts: Arr, ids: Arr, token: Arr)(using Scope): Arr =
+    val zero = scalar(0f)
+    val t = reshape(token, 1, 1)
+    add(counts, where(greater(ids, t), zero, where(greater(t, ids), zero, scalar(1f))))
 
   /** the model's own (generation_config.json): its temperature, top_p, top_k when it samples; else greedy */
   def of(dir: Path): Sampling =

@@ -5,7 +5,7 @@ import scala.scalanative.build.*
 
 ThisBuild / scalaVersion := "3.3.8"
 ThisBuild / organization := "io.github.sergey-scherbina"
-ThisBuild / version := "0.1.1-SNAPSHOT"
+ThisBuild / version := "0.1.0"
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/sergey-scherbina/mlx-scala"))
