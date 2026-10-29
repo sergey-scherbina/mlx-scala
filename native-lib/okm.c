@@ -311,6 +311,8 @@ void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, cons
   void* p = mmap(NULL, (size_t)(end - start), PROT_READ, MAP_SHARED, fd, start);  // read-only: never a page of its own
   close(fd);
   if (p == MAP_FAILED) { snprintf(err, sizeof err, "mmap %s: %s", path, strerror(errno)); return NULL; }
+  // read ahead now, in the background: the first pass finds the pages there instead of faulting them in one by one
+  madvise(p, (size_t)(end - start), MADV_WILLNEED);
   okm_map* m = malloc(sizeof *m); m->p = p; m->n = (size_t)(end - start);
   int len = (int)(end - start), b = (int)(offset - start), e = b + (int)nbytes, one = 1;
   mlx_array bytes = mlx_array_new_data_managed_payload(p, &len, 1, MLX_UINT8, m, okm_unmap);
