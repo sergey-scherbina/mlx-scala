@@ -72,6 +72,8 @@ private object C:
   def okm_rope(x: Long, dims: CInt, traditional: CInt, base: CFloat, scale: CFloat, offset: CInt): Long = extern
   def okm_sdpa(q: Long, k: Long, v: Long, scale: CFloat, causal: CInt): Long = extern
   def okm_load_open(path: CString): Long = extern
+  def okm_map_tensor(path: CString, offset: Long, nbytes: Long, dtype: CInt, shape: Ptr[CInt], ndim: CInt): Long =
+    extern
   def okm_load_next(file: Long, key: Ptr[CString], value: Ptr[Long]): CInt = extern
   def okm_load_close(file: Long): Unit = extern
   def okm_save_safetensors(path: CString, names: Ptr[CString], arrays: Ptr[Long], n: CInt, keys: Ptr[CString],
@@ -192,6 +194,8 @@ private[mlx] object Okm:
     }
 
   def loadOpen(path: String): Long = Zone.acquire(implicit z => C.okm_load_open(toCString(path)))
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int]): Long =
+    Zone.acquire(implicit z => C.okm_map_tensor(toCString(path), offset, nbytes, dtype, cints(shape), shape.length))
   def loadNext(file: Long): (String, Long) | Null =
     val key = stackalloc[CString]()
     val value = stackalloc[Long]()

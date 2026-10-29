@@ -174,6 +174,13 @@ object Mlx:
       b.result()
     finally Okm.loadClose(f)
 
+  /** bytes [offset, offset + nbytes) of a file as an array of `dtype` and `shape` over the file's own pages, mapped
+   * — no copy (Metal wraps them): read when first touched, the OS's to give back when memory is short */
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Dtype, shape: Seq[Int])(using s: Scope): Arr =
+    val h = Okm.mapTensor(path, offset, nbytes, dtype.ordinal, shape.toArray)
+    if h == 0L then throw MlxError(Okm.error())
+    s.own(h)
+
   /** all computed now, together */
   def evalAll(as: Seq[Arr]): Unit = check(Okm.evalAll(as.map(_.h).toArray))
 

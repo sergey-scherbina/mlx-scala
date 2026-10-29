@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "mlx/c/mlx.h"
 
 static mlx_stream S, CPU;
@@ -292,3 +296,35 @@ long okm_active_memory(void) { size_t r = 0; mlx_get_active_memory(&r); return (
 long okm_peak_memory(void) { size_t r = 0; mlx_get_peak_memory(&r); return (long)r; }
 // the buffers MLX keeps for reuse, given back (after a model is closed: its memory free for the next)
 int okm_clear_cache(void) { return mlx_clear_cache(); }
+
+// A TENSOR OF A FILE, MAPPED: bytes [offset, offset + nbytes) of the file, an array of `dtype` and `shape` over the
+// file's own pages — no copy: Metal wraps page-aligned memory as it is (newBuffer bytesNoCopy), the tensor a view
+// into it (slice, view, reshape; evaluated, they share the buffer). The pages read when first touched, and theirs
+// to give back when memory is short (they are the file's, clean); unmapped when the array is freed
+typedef struct { void* p; size_t n; } okm_map;
+static void okm_unmap(void* payload) { okm_map* m = payload; munmap(m->p, m->n); free(m); }
+void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, const int* shape, int ndim) {
+  long page = getpagesize();
+  long start = offset / page * page, end = (offset + nbytes + page - 1) / page * page;
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) { snprintf(err, sizeof err, "%s: %s", path, strerror(errno)); return NULL; }
+  void* p = mmap(NULL, (size_t)(end - start), PROT_READ, MAP_SHARED, fd, start);  // read-only: never a page of its own
+  close(fd);
+  if (p == MAP_FAILED) { snprintf(err, sizeof err, "mmap %s: %s", path, strerror(errno)); return NULL; }
+  okm_map* m = malloc(sizeof *m); m->p = p; m->n = (size_t)(end - start);
+  int len = (int)(end - start), b = (int)(offset - start), e = b + (int)nbytes, one = 1;
+  mlx_array bytes = mlx_array_new_data_managed_payload(p, &len, 1, MLX_UINT8, m, okm_unmap);
+  mlx_array s = mlx_array_new(), v = mlx_array_new(), r = mlx_array_new();
+  int bad = mlx_slice(&s, bytes, &b, 1, &e, 1, &one, 1, S) || mlx_view(&v, s, (mlx_dtype)dtype, S) ||
+    mlx_reshape(&r, v, shape, ndim, S);
+  mlx_array_free(bytes); mlx_array_free(s); mlx_array_free(v);
+  if (bad) { mlx_array_free(r); return NULL; }
+  if (getenv("OKM_MAP_DEBUG")) {
+    mlx_array_eval(r);
+    char* d = (char*)mlx_array_data_uint8(r);
+    if (d < (char*)p || d >= (char*)p + (end - start))
+      fprintf(stderr, "okm_map_tensor COPIED dtype %d nbytes %ld offset %ld (mod 16: %ld) ndim %d\n", dtype, nbytes,
+        offset, offset % 16, ndim);
+  }
+  return r.ctx;
+}

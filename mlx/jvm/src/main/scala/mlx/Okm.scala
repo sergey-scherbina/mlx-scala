@@ -92,6 +92,7 @@ private[mlx] object Okm:
   private val hRope = fn("okm_rope", J, J, I, I, F, F, I)
   private val hSdpa = fn("okm_sdpa", J, J, J, J, F, I)
   private val hLoadOpen = fn("okm_load_open", J, J)
+  private val hMapTensor = fn("okm_map_tensor", J, J, J, J, I, J, I)
   private val hLoadNext = fn("okm_load_next", I, J, J, J)
   private val hLoadClose = fn("okm_load_close", null, J)
   private val hSave = fn("okm_save_safetensors", I, J, J, J, I, J, J, I)
@@ -216,6 +217,13 @@ private[mlx] object Okm:
       if e != 0 then Array.empty else Array.tabulate(ndims.length)(i => outs.getAtIndex(JAVA_LONG, i.toLong))
     finally arena.close()
 
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int]): Long =
+    val arena = Arena.ofConfined()
+    try
+      val p = arena.allocateFrom(path)
+      val r: Long = hMapTensor.invokeExact(p.address(), offset, nbytes, dtype, ints(0, shape), shape.length)
+      r
+    finally arena.close()
   def loadOpen(path: String): Long =
     val arena = Arena.ofConfined()
     try

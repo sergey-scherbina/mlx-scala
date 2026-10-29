@@ -64,6 +64,21 @@ JSON is okay-simple's value module alone, `okay-effects-json-value` (no dependen
 On it, with effects: [okay-llm](https://github.com/okay-effects/okay-llm) (the model as an effect, a gateway for
 OpenAI's and Anthropic's APIs) and its MLX module [okay-mlx](https://github.com/okay-effects/okay-mlx).
 
+## Weights mapped
+
+`Model.load(dir, mapped = true)` (or MLX_SCALA_MMAP=1) maps the .safetensors instead of reading them: each tensor an
+array over the file's own pages — Metal wraps page-aligned memory as it is, the tensor a view into it — so nothing
+is copied at load, a page is read when first touched, and it is the file's (clean) for the OS to give back when
+memory is short. Qwen3.6-35B-A3B, M4 Max, 3 alternating rounds: loaded in 0.15 s instead of 2.7–3.6 s, the process's
+footprint 0.8 GB instead of 19 GB, the first token sooner (~4.4 s against ~5.7 s, the pages read by the first
+prefill), the decode the same (118.3 against 119.9 tok/s, the medians; within the host's noise) — and greedy tokens
+still mlx_lm's.
+
+A tensor maps only where its bytes sit aligned for its type, and MLX's writer does not pad the header: in
+mlx-community's files every tensor sits off by the header's length (a uint32 off a multiple of 4), and MLX copies
+what it cannot use in place. Such a file is mapped from an aligned copy — the same file, its header padded with
+spaces, as the format allows — written once under ~/.cache/mlx-scala/aligned (MLX_SCALA_ALIGNED): disk for memory.
+
 ## Measured
 
 Qwen3-4B (mlx-community, 4-bit), greedy, 256 tokens out, a different prompt each run; tokens a second, the median

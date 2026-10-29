@@ -427,13 +427,12 @@ object Qwen35:
 
   /** the model in a directory: config.json and its shards — the language model's weights alone (not the vision
    * tower's, nor the multi-token predictor's) */
-  def load(dir: Path): Qwen35 =
+  def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault): Qwen35 =
     Mlx.init()
     val config = Qwen35Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
-    val shards = Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(_.toString.endsWith(".safetensors"))
-    val all = shards.sorted.flatMap(p => loadSafetensors(p.toString)).toMap
+    val all = SafeTensors.shards(dir).flatMap(SafeTensors.load(_, mapped)).toMap
     val (keep, drop) = all.partition((k, _) => k.startsWith("language_model.") && !k.contains(".mtp."))
     drop.values.foreach(own.release)
     evalAll(keep.values.toSeq)

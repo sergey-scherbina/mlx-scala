@@ -37,9 +37,9 @@ object Model:
   /** whether `load` loads the model of a directory: its model_type one of those below */
   def loads(dir: Path): Boolean = modelType(dir).exists(Set("qwen3", "qwen3_5", "qwen3_5_moe"))
 
-  /** the model of a directory, by its config.json's model_type */
-  def load(dir: Path): Model =
+  /** the model of a directory, by its config.json's model_type; its weights read, or mapped (`SafeTensors`) */
+  def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault): Model =
     modelType(dir).getOrElse(sys.error(s"no config.json in $dir")) match
-      case "qwen3" => Qwen3.load(dir)
-      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir)
+      case "qwen3" => Qwen3.load(dir, mapped)
+      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir, mapped)
       case other => sys.error(s"a model type not supported: $other")
