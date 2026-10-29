@@ -19,6 +19,10 @@ Apple's MLX from Scala 3 on two platforms, one model code: the JVM through FFM (
 - No effects here: the model as an effect, the gateway, the app are okay-llm and okay-mlx, repositories of their
   own. The one thing shared with them is the JSON value.
 
+- `PrefixCache`: `Model.State.snapshot()` (handles of their own on the same arrays: `okm_retain`; MLX copies on
+  the next update) at `Chat.marks` (the second and the last `<|im_start|>`); `Session(..., cache, marks)` restores the
+  longest kept prefix of the prompt. Snapshots only at marks: a linear layer's state is not cut back.
+
 Rules:
 - A HANDLE HELD KEEPS ITS BUFFER: MLX frees an intermediate once the graph is done with it only if no handle holds
   it. Each layer runs in a `Scope` of its own, its output alone moved out (with a pass's intermediates held, a

@@ -15,7 +15,7 @@ sbt test                                              # the JVM and Scala Native
 |---|---|---|
 | `native-lib/okm.c` | mlx-c flattened: every argument a pointer, an int or a float — no struct by value crosses | mlx-c |
 | `mlx` | the MLX API: `Arr`, `Scope`, ops, fast kernels, quantized matmul, safetensors. `Okm` per platform: FFM `MethodHandle`s on the JVM, `@extern` on Scala Native — the rest shared | `okm` alone |
-| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `Qwen35` (Qwen3.5, Qwen3.6: Gated DeltaNet, MoE), `KvCache`, `Session` | `mlx` alone |
+| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `Qwen35` (Qwen3.5, Qwen3.6: Gated DeltaNet, MoE), `KvCache`, `Session`, `PrefixCache` | `mlx` alone |
 
 ```scala
 val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit").get
@@ -30,6 +30,10 @@ against `unicodedata` (Unicode 16; Scala Native has no `java.text.Normalizer`, s
 mlx/llm/nfc.txt by `scripts/gen-nfc.py` — on Native the app builds with `withEmbedResources(true)`); Qwen3's and
 Qwen3.6's chat templates against jinja2 as transformers configures it — system turns, thinking, tools, tool calls and
 responses, content parts.
+
+A prompt's prefixes are kept between generations (`PrefixCache`): a model's state snapshot at the marks `Chat.marks`
+gives — where messages begin; a hybrid model's recurrent state cannot be cut shorter, so a prefix is reused whole —
+and a prompt beginning with one is computed from there. Claude Code's next turn: 13.6k tokens' prefill 16 s → 0.2–0.3 s.
 
 JSON is okay-simple's value module alone, `okay-effects-json-value` (no dependency) — the same JSON as okay-llm's.
 

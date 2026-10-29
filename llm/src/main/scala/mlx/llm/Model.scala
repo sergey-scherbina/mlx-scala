@@ -8,6 +8,8 @@ import mlx.*
 /** A LANGUAGE MODEL on MLX: the next token's logits after some, its state (caches) carried from call to call */
 trait Model:
   def newState(): Model.State
+  /** a state as a snapshot of one was taken */
+  def restore(snapshot: Model.Snapshot): Model.State
   /** the next token's logits after `ids` [1, n], the state moved on by n */
   def logits(ids: Arr, state: Model.State)(using Scope): Arr
   def close(): Unit
@@ -15,6 +17,12 @@ trait Model:
 object Model:
   /** what a model keeps between calls: caches */
   trait State:
+    def close(): Unit
+    /** the state as it is now, kept: a prompt's prefix not computed again (`PrefixCache`) */
+    def snapshot(): Snapshot
+  /** a state kept: what it holds on the GPU, about */
+  trait Snapshot:
+    def bytes: Long
     def close(): Unit
 
   /** the model of a directory, by its config.json's model_type */

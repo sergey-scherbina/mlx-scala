@@ -42,7 +42,19 @@ final class LinearState:
     this.state = state.moveTo(own)
     if c0 != null then own.release(c0.nn)
     if s0 != null then own.release(s0.nn)
+  def snapshot(): LinearState.Snap =
+    val sc = new Scope
+    LinearState.Snap(sc, if conv == null then null else conv.nn.retain(sc),
+      if state == null then null else state.nn.retain(sc))
+  def restore(snap: LinearState.Snap): Unit =
+    conv = if snap.conv == null then null else snap.conv.nn.retain(own)
+    state = if snap.state == null then null else snap.state.nn.retain(own)
   def close(): Unit = own.close()
+
+object LinearState:
+  final class Snap(private[llm] val scope: Scope, private[llm] val conv: Arr | Null,
+      private[llm] val state: Arr | Null, val bytes: Long = 0L):
+    def close(): Unit = scope.close()
 
 /** QWEN3.5 AND QWEN3.6: a hybrid decoder — three layers in four linear attention (Gated DeltaNet: a causal
  * convolution, then the gated delta rule's recurrence, a Metal kernel), the fourth full attention with an output
@@ -126,6 +138,21 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
   /** a KV cache for a full attention layer, a recurrent state for a linear one */
   final class State(val caches: Vector[KvCache | LinearState]) extends Model.State:
     def close(): Unit = caches.foreach { case c: KvCache => c.close(); case l: LinearState => l.close() }
+    def snapshot(): Model.Snapshot = Snapshot(caches.map { case c: KvCache => c.snapshot(); case l: LinearState =>
+      l.snapshot() })
+  private val linearBytes = 2L * (convKernel - 1) * (2 * linearKeyHeads * linearKeyDim + linearValueHeads *
+    linearValueDim) + 4L * linearValueHeads * linearValueDim * linearKeyDim
+  private final class Snapshot(val snaps: Vector[KvCache.Snap | LinearState.Snap]) extends Model.Snapshot:
+    def bytes: Long = snaps.map { case k: KvCache.Snap => k.bytes; case _: LinearState.Snap => linearBytes }.sum
+    def close(): Unit = snaps.foreach { case k: KvCache.Snap => k.close(); case l: LinearState.Snap => l.close() }
+  def restore(snapshot: Model.Snapshot): State =
+    val st = newState()
+    st.caches.zip(snapshot.asInstanceOf[Snapshot].snaps).foreach {
+      case (c: KvCache, k: KvCache.Snap) => c.restore(k)
+      case (l: LinearState, k: LinearState.Snap) => l.restore(k)
+      case _ => sys.error("a snapshot of another model")
+    }
+    st
   def newState(): State = State(blocks.map(l =>
     if l.linear then LinearState() else KvCache(kvHeads, headDim)))
 

@@ -18,6 +18,9 @@ final class Arr private[mlx] (private[mlx] val h: Long, private[mlx] var owner: 
   def evalAsync(): this.type = { check(Okm.asyncEval(h)); this }
   def itemInt: Int = Okm.itemI32(h)
   def itemFloat: Float = Okm.itemF32(h)
+  /** a handle of its own on the same array, in `to`: the array kept as long as either is (arrays are immutable — a
+   * snapshot is a handle) */
+  def retain(to: Scope): Arr = to.own(Okm.retain(h))
   /** moved to `to`: kept when its scope closes */
   def moveTo(to: Scope): this.type =
     owner.forget(this); to.adopt(this); this

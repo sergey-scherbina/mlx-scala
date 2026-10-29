@@ -5,14 +5,17 @@ import mlx.Mlx.*
 
 /** what a generation measured: the prompt's tokens and the time to the first new one (the prefill), the tokens
  * made after it and their time (the decode) */
-final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, decodeNanos: Long):
-  def prefillPerSecond: Double = promptTokens / (prefillNanos / 1e9)
+final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, decodeNanos: Long, cachedTokens: Int = 0):
+  /** the prompt's tokens computed a second (not those a cache gave) */
+  def prefillPerSecond: Double = (promptTokens - cachedTokens) / (prefillNanos / 1e9)
   def decodePerSecond: Double = if tokens <= 1 then 0 else (tokens - 1) / (decodeNanos / 1e9)
 
 /** A GENERATION, a token at a time: the prompt in one pass, then a step a token — each next step built and started
  * on the GPU before the last one's token is read, so the CPU's work overlaps the GPU's. Greedy */
-final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean):
-  private val state = model.newState()
+final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean,
+    cache: PrefixCache | Null = null, marks: Seq[Int] = Nil):
+  private var state: Model.State | Null = null
+  private var cached = 0
   private val carry = new Scope
   private val t0 = System.nanoTime()
   private var firstAt = 0L
@@ -23,7 +26,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   private var stopped = false
 
   private def step(input: Arr): Arr = Scope(carry) {
-    Mlx.reshape(Mlx.argmax(model.logits(input, state), -1), 1, 1).evalAsync()
+    Mlx.reshape(Mlx.argmax(model.logits(input, state.nn), -1), 1, 1).evalAsync()
   }
 
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
@@ -31,13 +34,20 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     if finished then None
     else
       if y == null then
-        // the prompt but its last token in chunks, the state evaluated after each (memory bounded); the last token
-        // the first step — as mlx_lm's generate_step, so the numbers are its numbers
-        var at = 0
+        // from the longest prefix a cache keeps, if any; then the prompt but its last token in chunks, the state
+        // evaluated after each (memory bounded), a snapshot kept at each mark; the last token the first step — as
+        // mlx_lm's generate_step, so without a cache the numbers are its numbers
+        val reused = if cache == null then None else cache.nn.lookup(prompt)
+        state = reused.fold(model.newState())((_, snap) => model.restore(snap))
+        var at = reused.fold(0)(_._1)
+        cached = at
+        val points = marks.filter(m => m > at && m < prompt.length).sorted
         while prompt.length - at > 1 do
-          val m = math.min(Session.chunk, prompt.length - at - 1)
-          Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state).eval())
+          val next = points.find(_ > at).getOrElse(Int.MaxValue)
+          val m = math.min(math.min(Session.chunk, prompt.length - at - 1), next - at)
+          Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
           at += m
+          if at == next && cache != null then cache.nn.add(prompt.take(at), state.nn.snapshot())
         val input = Scope(carry)(Mlx.ints(prompt.drop(at), 1, prompt.length - at))
         y = step(input)
         carry.release(input)
@@ -59,12 +69,12 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   /** whether it ended at a stop token (else: at `maxTokens`) */
   def endedByStop: Boolean = stopped
   def timing: Timing =
-    Timing(prompt.length, firstAt - t0, made, (if endAt == 0 then System.nanoTime() else endAt) - firstAt)
+    Timing(prompt.length, firstAt - t0, made, (if endAt == 0 then System.nanoTime() else endAt) - firstAt, cached)
   def close(): Unit =
     if endAt == 0 then endAt = System.nanoTime()
     finished = true
     carry.close()
-    state.close()
+    if state != null then state.nn.close()
 
 object Session:
   /** a prompt's tokens a pass */

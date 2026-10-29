@@ -65,7 +65,27 @@ final class KvCache(kvHeads: Int, headDim: Int):
     values = bigger(values)
     capacity = cap
 
+  /** the cache as it is: handles of its own on the same buffers (immutable: the next update copies, not this) */
+  def snapshot(): KvCache.Snap =
+    val sc = new Scope
+    KvCache.Snap(sc, if keys == null then null else keys.nn.retain(sc), if values == null then null else
+      values.nn.retain(sc), capacity, offset, kvHeads, headDim)
+  /** the cache a snapshot was */
+  def restore(snap: KvCache.Snap): Unit =
+    keys = if snap.keys == null then null else snap.keys.nn.retain(own)
+    values = if snap.values == null then null else snap.values.nn.retain(own)
+    capacity = snap.capacity
+    offset = snap.offset
+
   def close(): Unit = own.close()
+
+object KvCache:
+  /** a cache kept: its buffers (bf16), how far they hold */
+  final class Snap(private[llm] val scope: Scope, private[llm] val keys: Arr | Null,
+      private[llm] val values: Arr | Null, private[llm] val capacity: Int, private[llm] val offset: Int, kvHeads: Int,
+      headDim: Int):
+    def bytes: Long = 2L * capacity * kvHeads * headDim * 2
+    def close(): Unit = scope.close()
 
 /** QWEN3: a decoder of `layers` blocks — attention with GQA and q/k RMS norms, RoPE; a SwiGLU MLP — over quantized
  * weights; the embedding is the output layer too (tied) */
@@ -97,7 +117,15 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   /** a KV cache a layer */
   final class State(val caches: Vector[KvCache]) extends Model.State:
     def close(): Unit = caches.foreach(_.close())
+    def snapshot(): Model.Snapshot = Snapshot(caches.map(_.snapshot()))
+  private final class Snapshot(val snaps: Vector[KvCache.Snap]) extends Model.Snapshot:
+    def bytes: Long = snaps.map(_.bytes).sum
+    def close(): Unit = snaps.foreach(_.close())
   def newState(): State = State(Vector.fill(layers)(KvCache(kvHeads, headDim)))
+  def restore(snapshot: Model.Snapshot): State =
+    val st = newState()
+    st.caches.zip(snapshot.asInstanceOf[Snapshot].snaps).foreach((c, sn) => c.restore(sn))
+    st
   def logits(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state.asInstanceOf[State].caches)
 
   private def attention(l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =

@@ -25,6 +25,8 @@ static mlx_optional_int oi(int v) { return (mlx_optional_int){.value = v, .has_v
 
 // arrays
 void okm_free(void* a) { mlx_array_free(A(a)); }
+// a handle of its own on the same array (arrays are immutable: a snapshot is a handle)
+void* okm_retain(void* a) { mlx_array r = mlx_array_new(); mlx_array_set(&r, A(a)); return r.ctx; }
 int okm_ndim(void* a) { return (int)mlx_array_ndim(A(a)); }
 int okm_dim(void* a, int i) { return mlx_array_shape(A(a))[i]; }
 int okm_dtype(void* a) { return (int)mlx_array_dtype(A(a)); }
