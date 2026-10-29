@@ -15,3 +15,12 @@ object Models:
     else
       val all = Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(Files.isDirectory(_))
       all.sortBy(p => -Files.getLastModifiedTime(p).toMillis).headOption
+
+  /** the repositories in the cache whose model `Model.load` loads (by config.json's model_type), by name — not
+   * an embedding model (Qwen3-Embedding's config is a causal LM's too) */
+  def cached(cache: Path = hubCache): Vector[String] =
+    if !Files.isDirectory(cache) then Vector.empty
+    else
+      Files.list(cache).toArray.map(_.asInstanceOf[Path].getFileName.toString).toVector
+        .filter(n => n.startsWith("models--") && !n.contains("Embedding")).map(_.stripPrefix("models--").replaceFirst("--", "/")).sorted
+        .filter(r => snapshot(r, cache).exists(Model.loads))

@@ -30,9 +30,16 @@ object Model:
     def tensors(using Scope): Vector[(String, Arr)]
     def meta: Map[String, String]
 
+  private def modelType(dir: Path): Option[String] =
+    val f = dir.resolve("config.json")
+    if !Files.exists(f) then None else Json.fromText(Files.readString(f)).field("model_type").map(_.string)
+
+  /** whether `load` loads the model of a directory: its model_type one of those below */
+  def loads(dir: Path): Boolean = modelType(dir).exists(Set("qwen3", "qwen3_5", "qwen3_5_moe"))
+
   /** the model of a directory, by its config.json's model_type */
   def load(dir: Path): Model =
-    Json.fromText(Files.readString(dir.resolve("config.json")))("model_type").string match
+    modelType(dir).getOrElse(sys.error(s"no config.json in $dir")) match
       case "qwen3" => Qwen3.load(dir)
       case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir)
       case other => sys.error(s"a model type not supported: $other")

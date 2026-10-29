@@ -181,6 +181,8 @@ object Mlx:
   def exportDot(a: Arr, path: String): Unit = check(Okm.exportDot(a.h, path))
 
   def activeMemory: Long = Okm.activeMemory()
+  /** the buffers MLX keeps for reuse freed: after a model is closed, its memory given back */
+  def clearCache(): Unit = check(Okm.clearCache())
   def peakMemory: Long = Okm.peakMemory()
 
 /** A CUSTOM METAL KERNEL: its source, run on arrays — MLX's `fast.metal_kernel`. Applied with its outputs' shapes and

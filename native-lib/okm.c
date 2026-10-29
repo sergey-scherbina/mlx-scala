@@ -290,3 +290,5 @@ int okm_export_dot(void* a, const char* path) {
 // memory
 long okm_active_memory(void) { size_t r = 0; mlx_get_active_memory(&r); return (long)r; }
 long okm_peak_memory(void) { size_t r = 0; mlx_get_peak_memory(&r); return (long)r; }
+// the buffers MLX keeps for reuse, given back (after a model is closed: its memory free for the next)
+int okm_clear_cache(void) { return mlx_clear_cache(); }

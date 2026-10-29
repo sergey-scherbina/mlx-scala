@@ -77,6 +77,7 @@ private object C:
   def okm_save_safetensors(path: CString, names: Ptr[CString], arrays: Ptr[Long], n: CInt, keys: Ptr[CString],
       values: Ptr[CString], m: CInt): CInt = extern
   def okm_active_memory(): Long = extern
+  def okm_clear_cache(): CInt = extern
   def okm_export_dot(a: Long, path: CString): CInt = extern
   def okm_peak_memory(): Long = extern
 
@@ -205,5 +206,6 @@ private[mlx] object Okm:
         keys.length)
     }
   def activeMemory(): Long = C.okm_active_memory()
+  def clearCache(): Int = C.okm_clear_cache()
   def exportDot(a: Long, path: String): Int = Zone.acquire(implicit z => C.okm_export_dot(a, toCString(path)))
   def peakMemory(): Long = C.okm_peak_memory()

@@ -96,6 +96,7 @@ private[mlx] object Okm:
   private val hLoadClose = fn("okm_load_close", null, J)
   private val hSave = fn("okm_save_safetensors", I, J, J, J, I, J, J, I)
   private val hActive = fn("okm_active_memory", J)
+  private val hClearCache = fn("okm_clear_cache", I)
   private val hExportDot = fn("okm_export_dot", I, J, J)
   private val hPeak = fn("okm_peak_memory", J)
 
@@ -242,6 +243,7 @@ private[mlx] object Okm:
       r
     finally arena.close()
   def activeMemory(): Long = hActive.invokeExact()
+  def clearCache(): Int = hClearCache.invokeExact()
   def exportDot(a: Long, path: String): Int =
     val arena = Arena.ofConfined()
     try
