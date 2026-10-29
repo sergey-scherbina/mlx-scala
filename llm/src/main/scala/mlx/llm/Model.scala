@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import java.nio.file.{Files, Path}
 import mlx.*
 
@@ -17,7 +19,7 @@ object Model:
 
   /** the model of a directory, by its config.json's model_type */
   def load(dir: Path): Model =
-    Json.parse(Files.readString(dir.resolve("config.json")))("model_type").str match
+    Json.fromText(Files.readString(dir.resolve("config.json")))("model_type").string match
       case "qwen3" => Qwen3.load(dir)
       case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir)
       case other => sys.error(s"a model type not supported: $other")

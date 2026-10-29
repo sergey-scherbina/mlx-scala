@@ -31,6 +31,8 @@ mlx/llm/nfc.txt by `scripts/gen-nfc.py` — on Native the app builds with `withE
 Qwen3.6's chat templates against jinja2 as transformers configures it — system turns, thinking, tools, tool calls and
 responses, content parts.
 
+JSON is okay-simple's value module alone, `okay-effects-json-value` (no dependency) — the same JSON as okay-llm's.
+
 On it, with effects: [okay-llm](https://github.com/okay-effects/okay-llm) (the model as an effect, a gateway for
 OpenAI's and Anthropic's APIs) and its MLX module [okay-mlx](https://github.com/okay-effects/okay-mlx).
 

@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import java.nio.file.{Files, Path}
 import mlx.*
 import mlx.Mlx.*
@@ -11,7 +13,7 @@ final case class Qwen3Config(
 
 object Qwen3Config:
   def apply(json: Json): Qwen3Config =
-    require(json("model_type").str == "qwen3", s"a qwen3 model expected: ${json("model_type")}")
+    require(json("model_type").string == "qwen3", s"a qwen3 model expected: ${json("model_type")}")
     val q = json("quantization")
     Qwen3Config(json("hidden_size").int, json("num_hidden_layers").int, json("num_attention_heads").int,
       json("num_key_value_heads").int, json("head_dim").int, json("rope_theta").double.toFloat,
@@ -138,7 +140,7 @@ object Qwen3:
   /** the model in a directory: config.json and its .safetensors shards */
   def load(dir: Path): Qwen3 =
     Mlx.init()
-    val config = Qwen3Config(Json.parse(Files.readString(dir.resolve("config.json"))))
+    val config = Qwen3Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
     val shards = Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(_.toString.endsWith(".safetensors"))

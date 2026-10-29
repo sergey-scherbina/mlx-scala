@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import java.nio.file.{Files, Path}
 
 /** A MODEL'S CHAT: its tokenizer and its chat template, from its directory — a conversation in, the prompt's tokens
@@ -15,8 +17,8 @@ final class Chat(val tokenizer: Tokenizer, val template: ChatTemplate, val stops
 
 object Chat:
   def load(dir: Path): Chat =
-    val tokenizer = Tokenizer.fromJson(Json.parse(Files.readString(dir.resolve("tokenizer.json"))))
-    val config = Json.parse(Files.readString(dir.resolve("config.json")))
+    val tokenizer = Tokenizer.fromJson(Json.fromText(Files.readString(dir.resolve("tokenizer.json"))))
+    val config = Json.fromText(Files.readString(dir.resolve("config.json")))
     val eos = config("eos_token_id") match
       case Json.Arr(ids) => ids.map(_.int).toSet
       case Json.Null => Set.empty[Int]

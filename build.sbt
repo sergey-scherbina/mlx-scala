@@ -9,6 +9,7 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/sergey-scherbina/mlx-scala"))
+ThisBuild / resolvers += "okay-simple" at "https://okay-effects.github.io/okay-simple/maven"
 
 /** native-lib/build.sh writes the libraries here: libokm (the flat layer), libmlxc, libmlx, mlx.metallib */
 val nativeLib = file("native-lib/out/lib").getAbsoluteFile
@@ -21,6 +22,7 @@ val nativeLinking = Seq(
   nativeConfig ~= (_.withMode(Mode.releaseFast).withLTO(LTO.none).withEmbedResources(true)
     .withLinkingOptions(Seq(s"-L$nativeLib", "-lmlxc", s"-Wl,-rpath,$nativeLib"))))
 
+val jsonValue = "0.1.1"
 val munit = Def.setting("org.scalameta" %%% "munit" % "1.2.3" % Test)
 
 /** THE MLX API: arrays, ops, fast kernels, quantized matmul, safetensors — `Okm` per platform, the rest shared */
@@ -31,7 +33,9 @@ lazy val mlx = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Ful
 
 /** A LANGUAGE MODEL on the MLX API alone: tokenizer, chat templates, Qwen3, its KV cache, generation */
 lazy val llm = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Pure).in(file("llm")).dependsOn(mlx)
-  .settings(name := "mlx-scala-llm", libraryDependencies += munit.value)
+  .settings(name := "mlx-scala-llm",
+    // JSON: the value alone, depending on nothing (okay-simple's okay-effects-json-value)
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json-value" % jsonValue, munit.value))
   .jvmSettings(jvmNative)
   .nativeSettings(nativeLinking)
 

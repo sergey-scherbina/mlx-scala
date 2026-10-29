@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import java.nio.file.{Files, Path}
 import mlx.*
 import mlx.Mlx.*
@@ -13,20 +15,20 @@ final case class Qwen35Config(
 
 object Qwen35Config:
   def apply(json: Json): Qwen35Config =
-    val t = json.get("text_config").getOrElse(json)
-    val rope = t.get("rope_parameters").getOrElse(t)
+    val t = json.field("text_config").getOrElse(json)
+    val rope = t.field("rope_parameters").getOrElse(t)
     val q = json("quantization")
-    val overrides = q.fields.collect { case (k, o: Json.Obj) => k -> (o("group_size").int, o("bits").int) }.toMap
+    val overrides = q.record.collect { case (k, o: Json.Obj) => k -> (o("group_size").int, o("bits").int) }.toMap
     val headDim = t("head_dim").int
-    val partial = rope.get("partial_rotary_factor").orElse(t.get("partial_rotary_factor")).map(_.double).getOrElse(0.25)
+    val partial = rope.field("partial_rotary_factor").orElse(t.field("partial_rotary_factor")).map(_.double).getOrElse(0.25)
     Qwen35Config(t("hidden_size").int, t("num_hidden_layers").int, t("num_attention_heads").int,
       t("num_key_value_heads").int, headDim, (headDim * partial).toInt,
-      rope.get("rope_theta").orElse(t.get("rope_theta")).map(_.double).getOrElse(1e7).toFloat,
-      t("rms_norm_eps").double.toFloat, t.get("full_attention_interval").map(_.int).getOrElse(4),
+      rope.field("rope_theta").orElse(t.field("rope_theta")).map(_.double).getOrElse(1e7).toFloat,
+      t("rms_norm_eps").double.toFloat, t.field("full_attention_interval").map(_.int).getOrElse(4),
       t("linear_num_key_heads").int, t("linear_num_value_heads").int, t("linear_key_head_dim").int,
-      t("linear_value_head_dim").int, t.get("linear_conv_kernel_dim").map(_.int).getOrElse(4),
-      t.get("num_experts").map(_.int).getOrElse(0), t.get("num_experts_per_tok").map(_.int).getOrElse(0),
-      t.get("norm_topk_prob").forall(_.bool), q("group_size").int, q("bits").int, overrides)
+      t("linear_value_head_dim").int, t.field("linear_conv_kernel_dim").map(_.int).getOrElse(4),
+      t.field("num_experts").map(_.int).getOrElse(0), t.field("num_experts_per_tok").map(_.int).getOrElse(0),
+      t.field("norm_topk_prob").forall(_.boolean), q("group_size").int, q("bits").int, overrides)
 
 /** A LINEAR LAYER'S RECURRENT STATE: the convolution's last inputs, the delta rule's state */
 final class LinearState:
@@ -376,7 +378,7 @@ object Qwen35:
    * tower's, nor the multi-token predictor's) */
   def load(dir: Path): Qwen35 =
     Mlx.init()
-    val config = Qwen35Config(Json.parse(Files.readString(dir.resolve("config.json"))))
+    val config = Qwen35Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
     val shards = Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(_.toString.endsWith(".safetensors"))

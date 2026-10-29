@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import scala.collection.mutable
 
 /** A BYTE-LEVEL BPE TOKENIZER read from a HuggingFace tokenizer.json (Qwen's, GPT-2's family): added tokens matched
@@ -90,26 +92,26 @@ final class Tokenizer private (
 object Tokenizer:
   def fromJson(json: Json): Tokenizer =
     val model = json("model")
-    require(model("type").str == "BPE", s"a BPE model expected: ${model("type")}")
+    require(model("type").string == "BPE", s"a BPE model expected: ${model("type")}")
     val vocab = java.util.HashMap[String, Integer]()
     var top = 0
-    for (k, v) <- model("vocab").fields do
+    for (k, v) <- model("vocab").record do
       vocab.put(k, v.int)
       top = top max v.int
     val ranks = java.util.HashMap[String, Integer]()
-    for (m, r) <- model("merges").items.zipWithIndex do
+    for (m, r) <- model("merges").list.zipWithIndex do
       val key = m match
-        case Json.Arr(Vector(a, b)) => a.str + " " + b.str
-        case s => s.str
+        case Json.Arr(Vector(a, b)) => a.string + " " + b.string
+        case s => s.string
       ranks.put(key, r)
-    val added = json("added_tokens").items.map(t => t("content").str -> t("id").int).toMap
-    val special = json("added_tokens").items.filter(_.get("special").exists(_.bool)).map(_("id").int).toSet
+    val added = json("added_tokens").list.map(t => t("content").string -> t("id").int).toMap
+    val special = json("added_tokens").list.filter(_.field("special").exists(_.boolean)).map(_("id").int).toSet
     val pieces = new Array[String]((top max added.values.max) + 1)
     vocab.forEach((k, v) => pieces(v) = k)
     for (k, v) <- added do pieces(v) = k
     val nfc = json("normalizer") match
       case Json.Null => false
-      case n if n("type").str == "NFC" => true
+      case n if n("type").string == "NFC" => true
       case n => sys.error(s"a normalizer not supported: $n")
     new Tokenizer(vocab, ranks, pieces, added, special, nfc)
 

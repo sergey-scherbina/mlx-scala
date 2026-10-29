@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 /** the tokenizer against HuggingFace `tokenizers` on Qwen3's tokenizer.json (ids from it, 0.22) — when the model is
  * in the HuggingFace cache */
 class TokenizerSuite extends munit.FunSuite:
@@ -22,7 +24,7 @@ class TokenizerSuite extends munit.FunSuite:
       Vector(37523, 27484, 145836, 323, 72858, 16744, 81705))
 
   private lazy val tokenizer = Models.snapshot("mlx-community/Qwen3-4B-4bit").map(d =>
-    Tokenizer.fromJson(Json.parse(String(java.nio.file.Files.readAllBytes(d.resolve("tokenizer.json")), "UTF-8"))))
+    Tokenizer.fromJson(Json.fromText(String(java.nio.file.Files.readAllBytes(d.resolve("tokenizer.json")), "UTF-8"))))
 
   test("the ids HuggingFace gives, and the text back"):
     assume(tokenizer.isDefined, "mlx-community/Qwen3-4B-4bit is not in the HuggingFace cache")

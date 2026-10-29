@@ -1,5 +1,7 @@
 package mlx.llm
 
+import okay.effects.json.Json
+
 import scala.collection.immutable.VectorMap
 import scala.collection.mutable
 
@@ -36,10 +38,10 @@ object ChatTemplate:
     val jinja = dir.resolve("chat_template.jinja")
     if java.nio.file.Files.exists(jinja) then parse(java.nio.file.Files.readString(jinja))
     else
-      val config = Json.parse(java.nio.file.Files.readString(dir.resolve("tokenizer_config.json")))
+      val config = Json.fromText(java.nio.file.Files.readString(dir.resolve("tokenizer_config.json")))
       config("chat_template") match
         case Json.Str(t) => parse(t)
-        case Json.Arr(ts) => parse(ts.find(_("name").str == "default").getOrElse(ts.head)("template").str)
+        case Json.Arr(ts) => parse(ts.find(_("name").string == "default").getOrElse(ts.head)("template").string)
         case other => sys.error(s"no chat template: $other")
 
   /** a template raised `raise_exception`, or went wrong */
@@ -49,10 +51,10 @@ object ChatTemplate:
   case object Undefined
 
   def fromJson(j: Json): Any = j match
-    case Json.Obj(f) => f.map((k, v) => k -> fromJson(v))
+    case Json.Obj(f) => VectorMap.from(f.map((k, v) => k -> fromJson(v)))
     case Json.Arr(xs) => xs.map(fromJson)
     case Json.Str(s) => s
-    case Json.Num(n) => if n == math.rint(n) && math.abs(n) < 9e15 then n.toLong else n
+    case Json.Num(n) => if n.isWhole && n.abs < BigDecimal(9e15) then n.toLong else n.toDouble
     case Json.Bool(b) => b
     case Json.Null => null
 
@@ -803,9 +805,7 @@ object ChatTemplate:
       case n: Long => n.toString
       case d: Double => pyFloat(d)
       case s: String =>
-        val sb = new java.lang.StringBuilder
-        Json.quote(s, sb)
-        sb.toString
+        Json.quote(s)
       case xs: Vector[?] =>
         if xs.isEmpty then "[]"
         else xs.map(x => nl(depth + 1) + toJson(x, indent, depth + 1)).mkString("[", comma, nl(depth) + "]")
