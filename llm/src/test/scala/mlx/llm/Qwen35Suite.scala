@@ -2,14 +2,15 @@ package mlx.llm
 
 import okay.effects.json.Json
 
-/** Qwen3.5-9B and Qwen3.6-35B-A3B (MLX, 4-bit): greedy tokens equal to mlx_lm's on the same prompt ids
- * (resources/qwen35-9b-greedy.json, qwen36-35b-greedy.json, by mlx_lm 0.31) — each when it is in the HuggingFace
- * cache. MLX_SKIP_BIG=1 leaves the 35B out */
+/** Qwen3.5-9B, Qwen3.6-35B-A3B and Qwen3.8-27B (MLX, 4-bit): greedy tokens equal to mlx_lm's on the same prompt
+ * ids (resources/qwen35-9b-greedy.json, qwen36-35b-greedy.json, qwen38-27b-greedy.json, by mlx_lm 0.31) — each when
+ * it is in the HuggingFace cache. MLX_SKIP_BIG=1 leaves the 35B out */
 class Qwen35Suite extends munit.FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(10, "min")
 
   for (repo, file) <- Seq("mlx-community/Qwen3.5-9B-MLX-4bit" -> "qwen35-9b-greedy.json",
-      "mlx-community/Qwen3.6-35B-A3B-4bit" -> "qwen36-35b-greedy.json") do
+      "mlx-community/Qwen3.6-35B-A3B-4bit" -> "qwen36-35b-greedy.json",
+      "mlx-community/Qwen3.8-27B-4bit" -> "qwen38-27b-greedy.json") do
     test(s"$repo: mlx_lm's tokens, greedy")(check(repo, file))
 
   private def check(repo: String, file: String): Unit =
