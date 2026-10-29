@@ -15,7 +15,7 @@ sbt test                                              # the JVM and Scala Native
 |---|---|---|
 | `native-lib/okm.c` | mlx-c flattened: every argument a pointer, an int or a float — no struct by value crosses | mlx-c |
 | `mlx` | the MLX API: `Arr`, `Scope`, ops, fast kernels, quantized matmul, safetensors. `Okm` per platform: FFM `MethodHandle`s on the JVM, `@extern` on Scala Native — the rest shared | `okm` alone |
-| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `KvCache`, `Generate` | `mlx` alone |
+| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `Qwen35` (Qwen3.5, Qwen3.6: Gated DeltaNet, MoE), `KvCache`, `Session` | `mlx` alone |
 
 ```scala
 val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit").get
@@ -26,11 +26,13 @@ Generate.greedy(model, prompt, 64, chat.stops)(id => print(chat.tokenizer.decode
 ```
 
 Checked against the Python reference on the same files: the tokenizer's ids against HuggingFace `tokenizers`; NFC
-against `unicodedata` (Unicode 16; Scala Native has no `java.text.Normalizer`, so the tables are generated,
-`scripts/gen-nfc.py`); Qwen3's and Qwen3.6's chat templates against jinja2 as transformers configures it — system
-turns, thinking, tools, tool calls and responses, content parts.
+against `unicodedata` (Unicode 16; Scala Native has no `java.text.Normalizer`, so Unicode's data is a resource,
+mlx/llm/nfc.txt by `scripts/gen-nfc.py` — on Native the app builds with `withEmbedResources(true)`); Qwen3's and
+Qwen3.6's chat templates against jinja2 as transformers configures it — system turns, thinking, tools, tool calls and
+responses, content parts.
 
-An app on it, with okay-scala's effects: [okay-mlx](https://github.com/okay-effects/okay-mlx).
+On it, with effects: [okay-llm](https://github.com/okay-effects/okay-llm) (the model as an effect, a gateway for
+OpenAI's and Anthropic's APIs) and its MLX module [okay-mlx](https://github.com/okay-effects/okay-mlx).
 
 ## Measured
 

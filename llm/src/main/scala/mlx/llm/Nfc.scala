@@ -2,11 +2,20 @@ package mlx.llm
 
 /** UNICODE NORMALIZATION FORM C, on both platforms (Scala Native's library has no `java.text.Normalizer`): each code
  * point fully decomposed, combining marks put in canonical order, then composed back where a primary composite
- * exists — Hangul by its formula. Tables from Unicode's data (NfcTables, generated) */
+ * exists — Hangul by its formula. Unicode's data from the resource mlx/llm/nfc.txt (scripts/gen-nfc.py): on Scala
+ * Native the app embeds resources — `nativeConfig ~= (_.withEmbedResources(true))` */
 object Nfc:
+  private val tables: Vector[Array[Int]] =
+    val in = getClass.getResourceAsStream("/mlx/llm/nfc.txt")
+    if in == null then throw IllegalStateException(
+      "mlx/llm/nfc.txt is not among the resources: on Scala Native, build with nativeConfig.withEmbedResources(true)")
+    try
+      String(in.readAllBytes(), "UTF-8").linesIterator.filterNot(_.startsWith("#")).map(line =>
+        line.split(' ').filter(_.nonEmpty).map(Integer.parseInt(_, 36))).toVector
+    finally in.close()
   private val decomposition: java.util.HashMap[Int, Array[Int]] =
     val m = java.util.HashMap[Int, Array[Int]]()
-    val d = NfcTables.decompositions
+    val d = tables(0)
     var i = 0
     while i < d.length do
       val n = d(i + 1)
@@ -15,13 +24,13 @@ object Nfc:
     m
   private val ccc: java.util.HashMap[Int, Int] =
     val m = java.util.HashMap[Int, Int]()
-    val c = NfcTables.combiningClasses
+    val c = tables(1)
     var i = 0
     while i < c.length do { m.put(c(i), c(i + 1)); i += 2 }
     m
   private val composite: java.util.HashMap[Long, Int] =
     val m = java.util.HashMap[Long, Int]()
-    val p = NfcTables.composites
+    val p = tables(2)
     var i = 0
     while i < p.length do { m.put(pair(p(i), p(i + 1)), p(i + 2)); i += 3 }
     m
