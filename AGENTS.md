@@ -9,11 +9,12 @@ Apple's MLX from Scala 3 on two platforms, one model code: the JVM through FFM (
 - `mlx/` (crossProject Full): `Okm` per platform — jvm: FFM `MethodHandle`s, a handle passed as `long` (the same
   register as a pointer), int arrays through a buffer of the thread's; native: `@extern` with handles as `Long`,
   arrays on the stack. `shared/Mlx.scala`: `Arr`, `Scope`, the ops. Depends on nothing.
-- `llm/`: `Json` (a reader), `Tokenizer` (byte-level BPE; Qwen's pre-tokenizer regex written out by hand — its
-  `(?!\S)` has no RE2 form), `Qwen3`, `KvCache`, `Generate` (greedy, the next step started before the last token is
-  read). Depends on `mlx` alone.
-- `app/`: the world through okay-scala's effects — `Llm` (mlx / fake), `Files` (disk / of), `Console` (stdout /
-  collect), std `Clock`, `Log`; `Programs.ask`, `Programs.bench`; `Main` wires the handlers.
+- `llm/`: `Json` (read and written, fields in order), `Tokenizer` (byte-level BPE; Qwen's pre-tokenizer regex
+  written out by hand — its `(?!\S)` has no RE2 form; NFC when tokenizer.json says), `Nfc` + generated `NfcTables`
+  (`scripts/gen-nfc.py`), `ChatTemplate` (a Jinja interpreter: transformers' jinja2 settings, trim_blocks and
+  lstrip_blocks; checked against jinja2 in `resources/templates/cases.json` — regenerate with jinja2 when adding a
+  template), `Chat` (tokenizer + template + stop tokens), `Qwen3`, `KvCache`, `Generate`. Depends on `mlx` alone.
+- Nothing here knows okay: the app on effects is okay-mlx, a repository of its own.
 
 Rules:
 - A HANDLE HELD KEEPS ITS BUFFER: MLX frees an intermediate once the graph is done with it only if no handle holds
@@ -23,5 +24,6 @@ Rules:
 - Tests that need the model skip when mlx-community/Qwen3-4B-4bit is not in the HuggingFace cache
   (`rozum models pull mlx-community:Qwen3-4B-4bit`, or any HF download).
 
-Build: `native-lib/build.sh` once; `sbt test` (JVM and Native); `sbt "appJVM/run ask <question>"`,
-`sbt "appNative/run bench 3"`. Lines of code at most 120 characters.
+Build: `native-lib/build.sh` once; `sbt test` (JVM and Native); `sbt publishLocal` for okay-mlx. Scala Native has
+no `java.time`, no `java.text.Normalizer`: write it, as `Nfc` and `ChatTemplate.strftime` do. Tests embed resources
+on Native (`withEmbedResources`). Lines of code at most 120 characters.

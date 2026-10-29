@@ -1,0 +1,396 @@
+[
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi!"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nHi!<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": false
+  },
+  "expected": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nThe user greets.\n</think>\n\nHi there!"
+    },
+    {
+     "role": "user",
+     "content": "How are you?"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\nHi there!<|im_end|>\n<|im_start|>user\nHow are you?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "tool_calls": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "days": 2
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 18}"
+    },
+    {
+     "role": "tool",
+     "content": "sunny"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Weather in a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\nLet me check.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"days\": 2}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\": 18}\n</tool_response>\n<tool_response>\nsunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helper."
+    },
+    {
+     "role": "user",
+     "content": "q1"
+    },
+    {
+     "role": "assistant",
+     "content": "a1",
+     "reasoning_content": "thinking about q1"
+    },
+    {
+     "role": "user",
+     "content": "q2"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": false
+  },
+  "expected": "<|im_start|>system\nYou are a helper.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Weather in a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nq1<|im_end|>\n<|im_start|>assistant\na1<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Describe "
+      },
+      {
+       "type": "text",
+       "text": "this."
+      }
+     ]
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": true
+  },
+  "expected": "ERROR: 'list object' has no attribute 'startswith'"
+ },
+ {
+  "template": "qwen3",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Ünïcödé — 日本語 \"quotes\" and \\ back"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nÜnïcödé — 日本語 \"quotes\" and \\ back<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi!"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nHi!<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": false
+  },
+  "expected": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nThe user greets.\n</think>\n\nHi there!"
+    },
+    {
+     "role": "user",
+     "content": "How are you?"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\nHi there!<|im_end|>\n<|im_start|>user\nHow are you?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "tool_calls": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "days": 2
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 18}"
+    },
+    {
+     "role": "tool",
+     "content": "sunny"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Weather in a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\": 18}\n</tool_response>\n<tool_response>\nsunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helper."
+    },
+    {
+     "role": "user",
+     "content": "q1"
+    },
+    {
+     "role": "assistant",
+     "content": "a1",
+     "reasoning_content": "thinking about q1"
+    },
+    {
+     "role": "user",
+     "content": "q2"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "add_generation_prompt": false
+  },
+  "expected": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Weather in a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helper.<|im_end|>\n<|im_start|>user\nq1<|im_end|>\n<|im_start|>assistant\na1<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Describe "
+      },
+      {
+       "type": "text",
+       "text": "this."
+      }
+     ]
+    }
+   ],
+   "add_generation_prompt": true,
+   "enable_thinking": true
+  },
+  "expected": "<|im_start|>user\nDescribe this.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "template": "qwen36",
+  "context": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Ünïcödé — 日本語 \"quotes\" and \\ back"
+    }
+   ],
+   "add_generation_prompt": true
+  },
+  "expected": "<|im_start|>user\nÜnïcödé — 日本語 \"quotes\" and \\ back<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ }
+]

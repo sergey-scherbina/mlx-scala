@@ -6,8 +6,7 @@ generation — as fast as rozum's Rust runtime on the same weights.
 
 ```
 native-lib/build.sh                                   # mlx-c (MLX v0.32.4) and okm, once
-sbt "appJVM/run ask What is a KV cache?"              # the JVM
-sbt "appNative/run bench 3"                           # Scala Native
+sbt test                                              # the JVM and Scala Native
 ```
 
 ## How it is built
@@ -16,26 +15,27 @@ sbt "appNative/run bench 3"                           # Scala Native
 |---|---|---|
 | `native-lib/okm.c` | mlx-c flattened: every argument a pointer, an int or a float — no struct by value crosses | mlx-c |
 | `mlx` | the MLX API: `Arr`, `Scope`, ops, fast kernels, quantized matmul, safetensors. `Okm` per platform: FFM `MethodHandle`s on the JVM, `@extern` on Scala Native — the rest shared | `okm` alone |
-| `llm` | `Tokenizer` (HuggingFace's ids, checked), `Qwen3`, `KvCache`, `Generate` | `mlx` alone |
-| `app` | the world through effects (okay-scala): `Llm`, `Files`, `Console`, `Clock`, `Log`; `ask`, `bench` | `llm`, okay-scala |
-
-Where nothing outside MLX is involved — arrays, the model, the tokenizer — the code is plain Scala over the MLX API.
-Where the app meets the world — which model answers, the files, the console, the clock — it is an effect, and a
-handler gives it its meaning: `Llm.mlx` (Qwen3 on the GPU) or `Llm.fake`, `Files.disk` or `Files.of(map)`,
-`Console.stdout` or `Console.collect`. The app's programs are tested without a GPU, a model or a disk.
+| `llm` | `Tokenizer` (byte-level BPE, HuggingFace's ids), `Nfc`, `ChatTemplate` (the model's Jinja, rendered as transformers does), `Chat`, `Qwen3`, `KvCache`, `Generate` | `mlx` alone |
 
 ```scala
-def ask[R[_]: Has[Llm] : Has[Console]](question: String, maxTokens: Int): Generation ! R =
-  for
-    g <- Llm.complete(question, maxTokens)
-    _ <- Console.line(g.text)
-  yield g
+val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit").get
+val chat = Chat.load(dir)                     // tokenizer.json + the chat template
+val model = Qwen3.load(dir)
+val prompt = chat.ask("What is the capital of France?", Map("enable_thinking" -> false))
+Generate.greedy(model, prompt, 64, chat.stops)(id => print(chat.tokenizer.decode(Seq(id))))
 ```
+
+Checked against the Python reference on the same files: the tokenizer's ids against HuggingFace `tokenizers`; NFC
+against `unicodedata` (Unicode 16; Scala Native has no `java.text.Normalizer`, so the tables are generated,
+`scripts/gen-nfc.py`); Qwen3's and Qwen3.6's chat templates against jinja2 as transformers configures it — system
+turns, thinking, tools, tool calls and responses, content parts.
+
+An app on it, with okay-scala's effects: [okay-mlx](https://github.com/okay-effects/okay-mlx).
 
 ## Measured
 
 Qwen3-4B (mlx-community, 4-bit), greedy, 256 tokens out, a different prompt each run; tokens a second, the median
-of 3 runs; M4 Max, 2026-10-29. mlx-scala in process; rozum through its HTTP API, streamed.
+of 3 runs; M4 Max, 2026-10-29. mlx-scala in process (okay-mlx's `bench`); rozum through its HTTP API, streamed.
 
 | prompt | mlx-scala, JVM | mlx-scala, Native | rozum (Rust) |
 |---|---|---|---|
