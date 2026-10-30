@@ -18,6 +18,7 @@ private object C:
   def okm_eval_all(as: Ptr[Long], n: CInt): CInt = extern
   def okm_item_i32(a: Long): CInt = extern
   def okm_to_i32(a: Long, out: Ptr[CInt], n: CInt): CInt = extern
+  def okm_copy_i32(a: Long, out: Ptr[CInt], n: CInt): CInt = extern
   def okm_item_f32(a: Long): CFloat = extern
   def okm_from_i32(data: Ptr[CInt], shape: Ptr[CInt], ndim: CInt): Long = extern
   def okm_scalar_f32(v: CFloat): Long = extern
@@ -109,9 +110,11 @@ private[mlx] object Okm:
   def asyncEval(a: Long): Int = C.okm_async_eval(a)
   def evalAll(as: Array[Long]): Int = C.okm_eval_all(as.at(0), as.length)
   def itemI32(a: Long): Int = C.okm_item_i32(a)
-  def toI32(a: Long, n: Int): Array[Int] = Zone.acquire { implicit z =>
+  def toI32(a: Long, n: Int): Array[Int] = i32(a, n, copy = false)
+  def copyI32(a: Long, n: Int): Array[Int] = i32(a, n, copy = true)
+  private def i32(a: Long, n: Int, copy: Boolean): Array[Int] = Zone.acquire { implicit z =>
     val out = alloc[CInt](math.max(n, 1))
-    val got = C.okm_to_i32(a, out, n)
+    val got = if copy then C.okm_copy_i32(a, out, n) else C.okm_to_i32(a, out, n)
     if got < 0 then null else Array.tabulate(math.min(got, n))(i => out(i))
   }
   def itemF32(a: Long): Float = C.okm_item_f32(a)

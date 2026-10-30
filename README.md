@@ -105,6 +105,12 @@ holds 67% of the picks, 64 82%, 128 93%; measured:
 The price is the wait each layer for the router's picks: read every layer, the decode is ~70 tok/s at most. A
 6.2k-token prompt: 5.3 s with 64 a layer, 4.2 s with all.
 
+READ AHEAD: each layer also runs the next layer's router on its own input — a guess at the next picks, right 82% of
+the time — computed in the same wait, and its missing experts read on a thread of its own while the GPU computes
+(MLX_SCALA_READ_AHEAD=0: not). 64 a layer: the picks found in memory 95% instead of 87%, the time reading misses
+halved (1.9 s → 0.9 s of a 10.7 s decode) — and the wait for the picks, two thirds of the time (the GPU's work and
+~0.26 ms a wait, 40 a token), what is left: the bound of a cache the CPU must steer.
+
 ## Measured
 
 Qwen3-4B (mlx-community, 4-bit), greedy, 256 tokens out, a different prompt each run; tokens a second, the median

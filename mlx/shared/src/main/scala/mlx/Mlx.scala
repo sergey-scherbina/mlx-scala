@@ -204,6 +204,15 @@ object Mlx:
   def readInto(fd: Int, dst: Arr, dstOffset: Long, fileOffset: Long, n: Long): Unit =
     check(Okm.readInto(fd, dst.h, dstOffset, fileOffset, n))
 
+  /** arrays computed together — one wait for the GPU — and read as ints */
+  def readInts(as: Seq[Arr])(using Scope): Seq[Array[Int]] =
+    val ints = as.map(a => if a.dtype == Dtype.Int32 then a else astype(a, Dtype.Int32))
+    evalAll(ints)
+    ints.map { a =>
+      val r = Okm.copyI32(a.h, a.shape.product)
+      if r == null then throw MlxError(Okm.error()) else r
+    }
+
   /** all computed now, together */
   def evalAll(as: Seq[Arr]): Unit = check(Okm.evalAll(as.map(_.h).toArray))
 

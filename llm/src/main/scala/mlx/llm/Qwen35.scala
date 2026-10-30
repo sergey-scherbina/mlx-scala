@@ -74,7 +74,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
 
   /** a layer's experts: all of them, or a cache of the hot ones (`ExpertCache`: its buffers in their place) */
   private final class Experts(prefix: String):
-    private val cache = hotExperts.get(prefix).orNull
+    val cache: ExpertCache | Null = hotExperts.get(prefix).orNull
     private type Q = (Arr, Arr, Arr, Int, Int)
     private def q(n: String) =
       val p = s"$prefix.$n"
@@ -95,13 +95,22 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     /** a step's few picks (n·k < 64) on the hot experts, when there is a cache: read to the CPU, the missing ones
      * read in, the picks mapped to their slots. A prompt's many on all of them (mapped: the GPU reads the file's
      * pages, the OS's cache — a prompt uses nearly every expert, too many to copy) */
-    def run(x: Arr, idx: Arr)(using Scope): Arr =
+    def run(x: Arr, idx: Arr, ahead: (Arr, ExpertCache) | Null = null)(using Scope): Arr =
       val n = idx.dim(1)
       val k = idx.dim(2)
       if n * k < 64 then
         if hot == null then squeeze(glu(x, idx, sorted = false), -2)
         else
-          val slots = cache.slotsOf(idx.toInts)
+          // the next layer's guess computed with these picks (one wait), its experts read ahead meanwhile
+          val t = System.nanoTime()
+          val picks =
+            if ahead == null then idx.toInts
+            else
+              val Seq(p, g) = readInts(Seq(idx, ahead._1)): @unchecked
+              ahead._2.prefetch(g)
+              p
+          Qwen35.waitNanos += System.nanoTime() - t
+          val slots = cache.nn.slotsOf(picks)
           squeeze(glu(x, astype(ints(slots, 1, n, k), Dtype.UInt32), sorted = false, hot.nn), -2)
       else
         val flat = reshape(idx, n * k)
@@ -251,7 +260,13 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       val scores = if normTopK then divide(s0, sum(s0, -1, keepdims = true)) else s0
       val seen = Qwen35.routes
       if seen != null then seen(l.i, inds.toInts)
-      val y = l.experts.run(expandDims(expandDims(x, -2), -2), inds)
+      // a step on hot experts: the next layer's router on this input, a guess at its picks to read ahead
+      val next = if n == 1 && l.i + 1 < layers then blocks(l.i + 1) else null
+      val ahead =
+        if next == null || next.experts.cache == null || !Qwen35.readAhead then null
+        else (slice(argpartition(next.router(x), experts - expertsPerToken, -1), Seq(0, 0, experts - expertsPerToken),
+          Seq(1, n, experts)), next.experts.cache.nn)
+      val y = l.experts.run(expandDims(expandDims(x, -2), -2), inds, ahead)
       val mixed = sum(multiply(y, expandDims(astype(scores, y.dtype), -1)), -2)
       val shared = l.sharedDown(swiglu(l.sharedGate(x), l.sharedUp(x)))
       add(mixed, multiply(sigmoid(l.sharedRouter(x)), shared))
@@ -301,6 +316,10 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     }
 
   private[llm] def counts: (Long, Long) = (hotExperts.values.map(_.hits).sum, hotExperts.values.map(_.misses).sum)
+  private[llm] def times: (Long, Long) =
+    (hotExperts.values.map(_.missNanos).sum, hotExperts.values.map(_.awaitNanos).sum)
+  private[llm] def ahead: (Long, Long) =
+    (hotExperts.values.map(_.prefetched).sum, hotExperts.values.map(_.prefetchedUsed).sum)
 
   def close(): Unit =
     hotExperts.values.foreach(_.close())
@@ -367,6 +386,10 @@ object Qwen35:
   /** WHO SEES THE ROUTING: each MoE layer's chosen experts (layer, n·k ids), read as they are chosen — a probe's
    * (it waits for the GPU each layer); null: none */
   @volatile var routes: ((Int, Array[Int]) => Unit) | Null = null
+  /** a decode on hot experts: the time waiting for the router's picks (the GPU) */
+  @volatile var waitNanos = 0L
+  /** hot experts read ahead (a guess from the next layer's router): MLX_SCALA_READ_AHEAD=0 not */
+  @volatile var readAhead: Boolean = !sys.env.get("MLX_SCALA_READ_AHEAD").contains("0")
   @volatile private[llm] var packedAllowed = !sys.env.get("MLX_SCALA_GDN").contains("unpacked")
 
   /** THE GATED DELTA RULE, Dk = 128: eight value rows packed in a SIMD-group, four lanes a row, each lane 32 state
@@ -478,6 +501,16 @@ object Qwen35:
           prefix -> ExpertCache(expertSlots, config.experts, parts, own)
         }.toMap
     new Qwen35(config, keep, own, caches)
+
+  /** a decode on hot experts, all layers: (nanos reading misses, nanos waiting for reads ahead) */
+  def expertTimes(m: Model): (Long, Long) = m match
+    case q: Qwen35 => q.times
+    case _ => (0L, 0L)
+
+  /** the reads ahead, all layers: (experts read ahead, of the guesses picked) */
+  def expertsAhead(m: Model): (Long, Long) = m match
+    case q: Qwen35 => q.ahead
+    case _ => (0L, 0L)
 
   /** the hot experts' counts, all layers: (hits, misses) */
   def expertCounts(m: Model): (Long, Long) = m match

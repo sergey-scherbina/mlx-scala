@@ -26,12 +26,21 @@ import mlx.*
     s.close()
     (s.timing.prefillNanos / 1e6, s.timing.decodePerSecond)
   val (first, _) = decode()
+  Qwen35.waitNanos = 0L
+  val (miss0, await0) = Qwen35.expertTimes(model)
+  val t0d = System.nanoTime()
   val runs = (1 to 3).map(_ => decode())
+  val total = (System.nanoTime() - t0d) / 1e6
+  val (miss1, await1) = Qwen35.expertTimes(model)
+  if slots > 0 then println(f"TIMES 3 runs $total%.0f ms: waiting for picks ${Qwen35.waitNanos / 1e6}%.0f ms, " +
+    f"reading misses ${(miss1 - miss0) / 1e6}%.0f ms, waiting for reads ahead ${(await1 - await0) / 1e6}%.0f ms")
   val pid = ProcessHandle.current().pid
   val fp = scala.sys.process.Process(Seq("footprint", pid.toString)).!!.linesIterator
     .find(_.contains("phys_footprint:")).map(_.trim).getOrElse("?")
   val (hits, misses) = Qwen35.expertCounts(model)
-  if slots > 0 then println(f"EXPERTS $slots a layer: hits ${100.0 * hits / math.max(1, hits + misses)}%.1f%%")
+  val (ahead, used) = Qwen35.expertsAhead(model)
+  if slots > 0 then println(f"EXPERTS $slots a layer: hits ${100.0 * hits / math.max(1, hits + misses)}%.1f%%, " +
+    s"misses $misses, read ahead $ahead, guesses picked $used")
   println(f"LOAD $repo slots=$slots mmap=${sys.env.getOrElse("MLX_SCALA_MMAP", "0")} load ${(t1 - t0) / 1e9}%.2f s, " +
     f"MLX holds ${Mlx.activeMemory / 1e9}%.1f GB, first prefill $first%.0f ms, decode " +
     runs.map(r => f"${r._2}%.1f").mkString(" / ") + s" tok/s, $fp")

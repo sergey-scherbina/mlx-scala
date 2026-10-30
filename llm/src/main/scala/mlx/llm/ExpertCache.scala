@@ -26,16 +26,51 @@ final class ExpertCache(val slots: Int, experts: Int, parts: Vector[SafeTensors.
   private val order = mutable.LinkedHashSet.from(0 until slots)
   var hits = 0L
   var misses = 0L
+  /** experts read ahead (`prefetch`), and of those, picked */
+  var prefetched = 0L
+  var prefetchedUsed = 0L
+  private var guess: Set[Int] = Set.empty
+  /** where a decode's time goes: reading misses (on the caller), waiting for a read ahead */
+  var missNanos = 0L
+  var awaitNanos = 0L
+  @volatile private var pending: java.util.concurrent.Future[?] | Null = null
+
+  /** READ AHEAD: `ids` (a guess at the next picks — the next layer's router on this layer's input) read in on a
+   * thread of its own, while the GPU computes; `slotsOf` waits for it first. The GPU must be done with this layer's
+   * slots (it is: the last that read them, a step before) */
+  def prefetch(ids: Array[Int]): Unit =
+    await()
+    val wanted = ids.distinct.take(slots)
+    guess = wanted.toSet
+    pending = ExpertCache.io.submit((() => bring(wanted, prefetching = true)): Runnable)
+
+  private def await(): Unit =
+    val p = pending
+    if p != null then
+      val t = System.nanoTime()
+      p.get()
+      awaitNanos += System.nanoTime() - t
+      pending = null
 
   /** the slots of `ids`, each there now (read in if not), none of `ids` put out for another of them */
   def slotsOf(ids: Array[Int]): Array[Int] =
+    await()
     val wanted = ids.distinct
     require(wanted.length <= slots, s"${wanted.length} experts at once, $slots slots")
+    if guess.nonEmpty then
+      prefetchedUsed += wanted.count(guess)
+      guess = Set.empty
+    val t = System.nanoTime()
+    bring(wanted, prefetching = false)
+    missNanos += System.nanoTime() - t
+    ids.map(slotOf)
+
+  private def bring(wanted: Array[Int], prefetching: Boolean): Unit = synchronized {
     val keep = mutable.Set.from(wanted.flatMap(e => Option(slotOf(e)).filter(_ >= 0)))
     for e <- wanted do
-      if slotOf(e) >= 0 then hits += 1
+      if slotOf(e) >= 0 then { if !prefetching then hits += 1 }
       else
-        misses += 1
+        if prefetching then prefetched += 1 else misses += 1
         val s = order.find(s => !keep(s)).get
         if expertIn(s) >= 0 then slotOf(expertIn(s)) = -1
         var i = 0
@@ -49,8 +84,17 @@ final class ExpertCache(val slots: Int, experts: Int, parts: Vector[SafeTensors.
       val s = slotOf(e)
       order -= s
       order += s
-    ids.map(slotOf)
+  }
 
   def close(): Unit =
+    await()
     fds.values.foreach(Mlx.closeFd)
     fds.clear()
+
+object ExpertCache:
+  /** the reads ahead: one thread, a daemon */
+  private val io = java.util.concurrent.Executors.newSingleThreadExecutor { r =>
+    val t = Thread(r, "expert-prefetch")
+    t.setDaemon(true)
+    t
+  }

@@ -58,6 +58,13 @@ int okm_to_i32(void* a, int* out, int n) {
   mlx_array_free(c);
   return size;
 }
+// an evaluated int32 array's data, copied out (n at most): its size, or -1 if it is not that
+int okm_copy_i32(void* a, int* out, int n) {
+  if (mlx_array_dtype(A(a)) != MLX_INT32) { snprintf(err, sizeof err, "okm_copy_i32: not int32"); return -1; }
+  int size = (int)mlx_array_size(A(a));
+  memcpy(out, mlx_array_data_int32(A(a)), sizeof(int) * (size < n ? size : n));
+  return size;
+}
 float okm_item_f32(void* a) { float r = 0; mlx_array_item_float32(&r, A(a)); return r; }
 void* okm_from_i32(const int* data, const int* shape, int ndim) {
   return mlx_array_new_data(data, shape, ndim, MLX_INT32).ctx;
