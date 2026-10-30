@@ -42,6 +42,7 @@ private[mlx] object Okm:
   private val hAsyncEval = fn("okm_async_eval", I, J)
   private val hEvalAll = fn("okm_eval_all", I, J, I)
   private val hItemI32 = fn("okm_item_i32", I, J)
+  private val hToI32 = fn("okm_to_i32", I, J, J, I)
   private val hItemF32 = fn("okm_item_f32", F, J)
   private val hFromI32 = fn("okm_from_i32", J, J, J, I)
   private val hScalarF32 = fn("okm_scalar_f32", J, F)
@@ -92,7 +93,11 @@ private[mlx] object Okm:
   private val hRope = fn("okm_rope", J, J, I, I, F, F, I)
   private val hSdpa = fn("okm_sdpa", J, J, J, J, F, I)
   private val hLoadOpen = fn("okm_load_open", J, J)
-  private val hMapTensor = fn("okm_map_tensor", J, J, J, J, I, J, I)
+  private val hMapTensor = fn("okm_map_tensor", J, J, J, J, I, J, I, I)
+  private val hBuffer = fn("okm_buffer", J, J, I, I)
+  private val hOpenFd = fn("okm_open_fd", I, J)
+  private val hCloseFd = fn("okm_close_fd", I, I)
+  private val hReadInto = fn("okm_read_into", I, I, J, J, J, J)
   private val hLoadNext = fn("okm_load_next", I, J, J, J)
   private val hLoadClose = fn("okm_load_close", null, J)
   private val hSave = fn("okm_save_safetensors", I, J, J, J, I, J, J, I)
@@ -120,6 +125,13 @@ private[mlx] object Okm:
       r
     finally arena.close()
   def itemI32(a: Long): Int = hItemI32.invokeExact(a)
+  def toI32(a: Long, n: Int): Array[Int] =
+    val arena = Arena.ofConfined()
+    try
+      val out = arena.allocate(JAVA_INT, math.max(n, 1).toLong)
+      val got: Int = hToI32.invokeExact(a, out.address(), n)
+      if got < 0 then null else out.asSlice(0, 4L * math.min(got, n)).toArray(JAVA_INT)
+    finally arena.close()
   def itemF32(a: Long): Float = hItemF32.invokeExact(a)
   def fromI32(data: Array[Int], shape: Array[Int]): Long =
     val arena = Arena.ofConfined()
@@ -217,13 +229,24 @@ private[mlx] object Okm:
       if e != 0 then Array.empty else Array.tabulate(ndims.length)(i => outs.getAtIndex(JAVA_LONG, i.toLong))
     finally arena.close()
 
-  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int]): Long =
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int], advise: Boolean): Long =
     val arena = Arena.ofConfined()
     try
       val p = arena.allocateFrom(path)
-      val r: Long = hMapTensor.invokeExact(p.address(), offset, nbytes, dtype, ints(0, shape), shape.length)
+      val r: Long = hMapTensor.invokeExact(p.address(), offset, nbytes, dtype, ints(0, shape), shape.length,
+        if advise then 1 else 0)
       r
     finally arena.close()
+  def buffer(shape: Array[Int], dtype: Int): Long = hBuffer.invokeExact(ints(0, shape), shape.length, dtype)
+  def openFd(path: String): Int =
+    val arena = Arena.ofConfined()
+    try
+      val r: Int = hOpenFd.invokeExact(arena.allocateFrom(path).address())
+      r
+    finally arena.close()
+  def closeFd(fd: Int): Int = hCloseFd.invokeExact(fd)
+  def readInto(fd: Int, dst: Long, dstOffset: Long, fileOffset: Long, n: Long): Int =
+    hReadInto.invokeExact(fd, dst, dstOffset, fileOffset, n)
   def loadOpen(path: String): Long =
     val arena = Arena.ofConfined()
     try

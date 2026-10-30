@@ -39,8 +39,8 @@ object Model:
 
   /** the model of a directory, by its config.json's model_type; its weights read, or mapped (`SafeTensors`) */
   def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
-      inPlace: Boolean = SafeTensors.alignInPlace): Model =
+      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0): Model =
     modelType(dir).getOrElse(sys.error(s"no config.json in $dir")) match
       case "qwen3" => Qwen3.load(dir, mapped, inPlace)
-      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir, mapped, inPlace)
+      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir, mapped, inPlace, expertSlots)
       case other => sys.error(s"a model type not supported: $other")

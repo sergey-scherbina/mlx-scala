@@ -17,6 +17,11 @@ final class Arr private[mlx] (private[mlx] val h: Long, private[mlx] var owner: 
   /** computed in the background: a later `eval` or `item` waits for it */
   def evalAsync(): this.type = { check(Okm.asyncEval(h)); this }
   def itemInt: Int = Okm.itemI32(h)
+  /** all of it, computed now, as ints (row-major) */
+  def toInts: Array[Int] =
+    val n = shape.product
+    val r = Okm.toI32(h, n)
+    if r == null then throw MlxError(Okm.error()) else r
   def itemFloat: Float = Okm.itemF32(h)
   /** a handle of its own on the same array, in `to`: the array kept as long as either is (arrays are immutable — a
    * snapshot is a handle) */
@@ -175,11 +180,29 @@ object Mlx:
     finally Okm.loadClose(f)
 
   /** bytes [offset, offset + nbytes) of a file as an array of `dtype` and `shape` over the file's own pages, mapped
-   * — no copy (Metal wraps them): read when first touched, the OS's to give back when memory is short */
-  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Dtype, shape: Seq[Int])(using s: Scope): Arr =
-    val h = Okm.mapTensor(path, offset, nbytes, dtype.ordinal, shape.toArray)
+   * — no copy (Metal wraps them): read when first touched (and ahead, in the background: `readAhead`), the OS's to
+   * give back when memory is short */
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Dtype, shape: Seq[Int], readAhead: Boolean = true)
+      (using s: Scope): Arr =
+    val h = Okm.mapTensor(path, offset, nbytes, dtype.ordinal, shape.toArray, readAhead)
     if h == 0L then throw MlxError(Okm.error())
     s.own(h)
+
+  /** zeros of `shape`, a contiguous buffer of its own, computed: memory `readInto` may fill */
+  def buffer(shape: Seq[Int], dtype: Dtype)(using s: Scope): Arr =
+    val h = Okm.buffer(shape.toArray, dtype.ordinal)
+    if h == 0L then throw MlxError(Okm.error())
+    s.own(h)
+
+  /** a file open to read from (`readInto`) */
+  def openFd(path: String): Int =
+    val fd = Okm.openFd(path)
+    if fd < 0 then throw MlxError(Okm.error()) else fd
+  def closeFd(fd: Int): Unit = Okm.closeFd(fd)
+
+  /** n bytes of a file at `fileOffset` into `dst`'s memory (a `buffer`) at `dstOffset` — the GPU done with that part */
+  def readInto(fd: Int, dst: Arr, dstOffset: Long, fileOffset: Long, n: Long): Unit =
+    check(Okm.readInto(fd, dst.h, dstOffset, fileOffset, n))
 
   /** all computed now, together */
   def evalAll(as: Seq[Arr]): Unit = check(Okm.evalAll(as.map(_.h).toArray))

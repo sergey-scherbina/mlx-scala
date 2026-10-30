@@ -63,7 +63,8 @@ object LinearState:
  * convolution, then the gated delta rule's recurrence, a Metal kernel), the fourth full attention with an output
  * gate and partial RoPE; its MLP dense, or a mixture of experts (top-k of many, and a shared expert) — over quantized
  * weights. As MLX's mlx_lm (qwen3_5.py, qwen3_next.py, gated_delta.py) computes it */
-final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr], own: Scope) extends Model:
+final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr], own: Scope,
+    hotExperts: Map[String, ExpertCache]) extends Model:
   import config.*
   private val P = "language_model.model."
   private def w(name: String): Arr = weights.getOrElse(name, sys.error(s"no weight $name"))
@@ -71,24 +72,37 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     val (gs, b) = quantized.getOrElse(prefix, (groupSize, bits))
     QLinear(w(s"$prefix.weight"), w(s"$prefix.scales"), w(s"$prefix.biases"), gs, b)
 
+  /** a layer's experts: all of them, or a cache of the hot ones (`ExpertCache`: its buffers in their place) */
   private final class Experts(prefix: String):
+    private val cache = hotExperts.get(prefix).orNull
+    private type Q = (Arr, Arr, Arr, Int, Int)
     private def q(n: String) =
       val p = s"$prefix.$n"
       val (gs, b) = quantized.getOrElse(p, (groupSize, bits))
       (w(s"$p.weight"), w(s"$p.scales"), w(s"$p.biases"), gs, b)
-    private val gate = q("gate_proj")
-    private val up = q("up_proj")
-    private val down = q("down_proj")
-    private def glu(x: Arr, idx: Arr, sorted: Boolean)(using Scope) =
-      def at(t: (Arr, Arr, Arr, Int, Int), v: Arr) = gatherQmm(v, t._1, t._2, t._3, idx, transpose = true, t._4,
-        t._5, sorted)
-      at(down, swiglu(at(gate, x), at(up, x)))
+    private val all: (Q, Q, Q) = (q("gate_proj"), q("up_proj"), q("down_proj"))
+    // the cache's slots in their place: the same quantization, `slots` experts
+    private val hot: (Q, Q, Q) | Null =
+      if cache == null then null
+      else
+        def s(t: Q, at: Int): Q = (cache.buffers(at), cache.buffers(at + 1), cache.buffers(at + 2), t._4, t._5)
+        (s(all._1, 0), s(all._2, 3), s(all._3, 6))
+    private def glu(x: Arr, idx: Arr, sorted: Boolean, on: (Q, Q, Q) = all)(using Scope) =
+      def at(t: Q, v: Arr) = gatherQmm(v, t._1, t._2, t._3, idx, transpose = true, t._4, t._5, sorted)
+      at(on._3, swiglu(at(on._1, x), at(on._2, x)))
     /** x [1, n, 1, 1, D], idx [1, n, k]: [1, n, k, D]. With many rows (n·k ≥ 64) they go sorted by expert, each
      * expert's weights read once — mlx_lm's `_gather_sort` */
+    /** a step's few picks (n·k < 64) on the hot experts, when there is a cache: read to the CPU, the missing ones
+     * read in, the picks mapped to their slots. A prompt's many on all of them (mapped: the GPU reads the file's
+     * pages, the OS's cache — a prompt uses nearly every expert, too many to copy) */
     def run(x: Arr, idx: Arr)(using Scope): Arr =
       val n = idx.dim(1)
       val k = idx.dim(2)
-      if n * k < 64 then squeeze(glu(x, idx, sorted = false), -2)
+      if n * k < 64 then
+        if hot == null then squeeze(glu(x, idx, sorted = false), -2)
+        else
+          val slots = cache.slotsOf(idx.toInts)
+          squeeze(glu(x, astype(ints(slots, 1, n, k), Dtype.UInt32), sorted = false, hot.nn), -2)
       else
         val flat = reshape(idx, n * k)
         val order = argsort(flat, 0)
@@ -97,7 +111,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
         val y = glu(rows, take(flat, order, 0), sorted = true)
         squeeze(reshape(take(y, inverse, 0), 1, n, k, 1, y.dim(-1)), -2)
 
-  private final class Layer(i: Int):
+  private final class Layer(val i: Int):
     private val p = s"${P}layers.$i"
     val linear: Boolean = (i + 1) % interval != 0
     val inNorm: Arr = w(s"$p.input_layernorm.weight")
@@ -235,6 +249,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
         Seq(1, n, experts))
       val s0 = takeAlong(gates, inds, -1)
       val scores = if normTopK then divide(s0, sum(s0, -1, keepdims = true)) else s0
+      val seen = Qwen35.routes
+      if seen != null then seen(l.i, inds.toInts)
       val y = l.experts.run(expandDims(expandDims(x, -2), -2), inds)
       val mixed = sum(multiply(y, expandDims(astype(scores, y.dtype), -1)), -2)
       val shared = l.sharedDown(swiglu(l.sharedGate(x), l.sharedUp(x)))
@@ -284,7 +300,11 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       stat(h)
     }
 
-  def close(): Unit = own.close()
+  private[llm] def counts: (Long, Long) = (hotExperts.values.map(_.hits).sum, hotExperts.values.map(_.misses).sum)
+
+  def close(): Unit =
+    hotExperts.values.foreach(_.close())
+    own.close()
 
 object Qwen35:
   /** THE GATED DELTA RULE, a step a position: for each value head, state ← state·g; kv = state·k;
@@ -344,6 +364,9 @@ object Qwen35:
     """)
 
   /** MLX_SCALA_GDN=unpacked: the generic kernel everywhere (an A/B) */
+  /** WHO SEES THE ROUTING: each MoE layer's chosen experts (layer, n·k ids), read as they are chosen — a probe's
+   * (it waits for the GPU each layer); null: none */
+  @volatile var routes: ((Int, Array[Int]) => Unit) | Null = null
   @volatile private[llm] var packedAllowed = !sys.env.get("MLX_SCALA_GDN").contains("unpacked")
 
   /** THE GATED DELTA RULE, Dk = 128: eight value rows packed in a SIMD-group, four lanes a row, each lane 32 state
@@ -427,14 +450,36 @@ object Qwen35:
 
   /** the model in a directory: config.json and its shards — the language model's weights alone (not the vision
    * tower's, nor the multi-token predictor's) */
+  /** `expertSlots` > 0, fewer than its experts: a mixture of experts' hot ones alone in memory, that many a layer
+   * (`ExpertCache`), the rest read from the files as picked */
   def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
-      inPlace: Boolean = SafeTensors.alignInPlace): Qwen35 =
+      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0): Qwen35 =
     Mlx.init()
     val config = Qwen35Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
-    val all = SafeTensors.shards(dir).flatMap(SafeTensors.load(_, mapped, inPlace)).toMap
+    val hot = expertSlots > 0 && config.experts > expertSlots
+    require(!hot || mapped, "hot experts need the weights mapped")
+    // the experts mapped cold: their pages read only as a prompt's pass uses them
+    val expertTensor = (k: String) => hot && k.contains(".mlp.switch_mlp.")
+    val shards = SafeTensors.shards(dir)
+    val all = shards.flatMap(SafeTensors.load(_, mapped, inPlace, expertTensor)).toMap
     val (keep, drop) = all.partition((k, _) => k.startsWith("language_model.") && !k.contains(".mtp."))
     drop.values.foreach(own.release)
     evalAll(keep.values.toSeq)
-    new Qwen35(config, keep, own)
+    val caches =
+      if !hot then Map.empty[String, ExpertCache]
+      else
+        val where = shards.flatMap(SafeTensors.locate(_, inPlace)).toMap
+        (0 until config.layers).map { i =>
+          val prefix = s"language_model.model.layers.$i.mlp.switch_mlp"
+          val parts = for m <- Vector("gate_proj", "up_proj", "down_proj"); t <- Vector("weight", "scales", "biases")
+            yield where(s"$prefix.$m.$t")
+          prefix -> ExpertCache(expertSlots, config.experts, parts, own)
+        }.toMap
+    new Qwen35(config, keep, own, caches)
+
+  /** the hot experts' counts, all layers: (hits, misses) */
+  def expertCounts(m: Model): (Long, Long) = m match
+    case q: Qwen35 => q.counts
+    case _ => (0L, 0L)

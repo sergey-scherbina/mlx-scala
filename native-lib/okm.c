@@ -49,6 +49,15 @@ int okm_eval_all(void** as, int n) {
   int r = mlx_eval(v); mlx_vector_array_free(v); return r;
 }
 int okm_item_i32(void* a) { int32_t r = 0; mlx_array_item_int32(&r, A(a)); return r; }
+// all of it as int32, into out (n at most): its size, or -1
+int okm_to_i32(void* a, int* out, int n) {
+  mlx_array c = mlx_array_new();
+  if (mlx_astype(&c, A(a), MLX_INT32, S) || mlx_array_eval(c)) { mlx_array_free(c); return -1; }
+  int size = (int)mlx_array_size(c);
+  memcpy(out, mlx_array_data_int32(c), sizeof(int) * (size < n ? size : n));
+  mlx_array_free(c);
+  return size;
+}
 float okm_item_f32(void* a) { float r = 0; mlx_array_item_float32(&r, A(a)); return r; }
 void* okm_from_i32(const int* data, const int* shape, int ndim) {
   return mlx_array_new_data(data, shape, ndim, MLX_INT32).ctx;
@@ -303,7 +312,8 @@ int okm_clear_cache(void) { return mlx_clear_cache(); }
 // to give back when memory is short (they are the file's, clean); unmapped when the array is freed
 typedef struct { void* p; size_t n; } okm_map;
 static void okm_unmap(void* payload) { okm_map* m = payload; munmap(m->p, m->n); free(m); }
-void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, const int* shape, int ndim) {
+void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, const int* shape, int ndim,
+    int advise) {
   long page = getpagesize();
   long start = offset / page * page, end = (offset + nbytes + page - 1) / page * page;
   int fd = open(path, O_RDONLY);
@@ -312,7 +322,7 @@ void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, cons
   close(fd);
   if (p == MAP_FAILED) { snprintf(err, sizeof err, "mmap %s: %s", path, strerror(errno)); return NULL; }
   // read ahead now, in the background: the first pass finds the pages there instead of faulting them in one by one
-  madvise(p, (size_t)(end - start), MADV_WILLNEED);
+  if (advise) madvise(p, (size_t)(end - start), MADV_WILLNEED);
   okm_map* m = malloc(sizeof *m); m->p = p; m->n = (size_t)(end - start);
   int len = (int)(end - start), b = (int)(offset - start), e = b + (int)nbytes, one = 1;
   mlx_array bytes = mlx_array_new_data_managed_payload(p, &len, 1, MLX_UINT8, m, okm_unmap);
@@ -329,4 +339,38 @@ void* okm_map_tensor(const char* path, long offset, long nbytes, int dtype, cons
         offset, offset % 16, ndim);
   }
   return r.ctx;
+}
+
+// A BUFFER OF ITS OWN: zeros of `shape`, contiguous and computed — memory a caller may write into (okm_read_into);
+// not MLX's broadcast scalar a plain zeros is
+void* okm_buffer(const int* shape, int ndim, int dtype) {
+  mlx_array z = mlx_array_new(), r = mlx_array_new();
+  int bad = mlx_zeros(&z, shape, ndim, (mlx_dtype)dtype, S) || mlx_contiguous(&r, z, false, S) || mlx_array_eval(r);
+  mlx_array_free(z);
+  if (bad) { mlx_array_free(r); return NULL; }
+  // row-major strides, none of them 0: memory of its own, not a broadcast
+  const size_t* st = mlx_array_strides(r); size_t want = 1; int own = 1;
+  for (int i = ndim - 1; i >= 0; i--) { if (shape[i] > 1 && st[i] != want) own = 0; want *= (size_t)shape[i]; }
+  if (!own) {
+    snprintf(err, sizeof err, "okm_buffer: not a buffer of its own"); mlx_array_free(r); return NULL;
+  }
+  return r.ctx;
+}
+int okm_open_fd(const char* path) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) snprintf(err, sizeof err, "%s: %s", path, strerror(errno));
+  return fd;
+}
+int okm_close_fd(int fd) { return close(fd); }
+// n bytes of a file, at file_offset, into an array's own memory (okm_buffer's) at dst_offset: the GPU done with
+// that part of it (the caller's to know)
+int okm_read_into(int fd, void* dst, long dst_offset, long file_offset, long n) {
+  char* p = (char*)mlx_array_data_uint8(A(dst)) + dst_offset;
+  long done = 0;
+  while (done < n) {
+    ssize_t r = pread(fd, p + done, (size_t)(n - done), file_offset + done);
+    if (r <= 0) { snprintf(err, sizeof err, "pread: %s", r == 0 ? "end of file" : strerror(errno)); return -1; }
+    done += r;
+  }
+  return 0;
 }

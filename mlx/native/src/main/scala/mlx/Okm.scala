@@ -17,6 +17,7 @@ private object C:
   def okm_async_eval(a: Long): CInt = extern
   def okm_eval_all(as: Ptr[Long], n: CInt): CInt = extern
   def okm_item_i32(a: Long): CInt = extern
+  def okm_to_i32(a: Long, out: Ptr[CInt], n: CInt): CInt = extern
   def okm_item_f32(a: Long): CFloat = extern
   def okm_from_i32(data: Ptr[CInt], shape: Ptr[CInt], ndim: CInt): Long = extern
   def okm_scalar_f32(v: CFloat): Long = extern
@@ -72,8 +73,12 @@ private object C:
   def okm_rope(x: Long, dims: CInt, traditional: CInt, base: CFloat, scale: CFloat, offset: CInt): Long = extern
   def okm_sdpa(q: Long, k: Long, v: Long, scale: CFloat, causal: CInt): Long = extern
   def okm_load_open(path: CString): Long = extern
-  def okm_map_tensor(path: CString, offset: Long, nbytes: Long, dtype: CInt, shape: Ptr[CInt], ndim: CInt): Long =
-    extern
+  def okm_buffer(shape: Ptr[CInt], ndim: CInt, dtype: CInt): Long = extern
+  def okm_open_fd(path: CString): CInt = extern
+  def okm_close_fd(fd: CInt): CInt = extern
+  def okm_read_into(fd: CInt, dst: Long, dstOffset: Long, fileOffset: Long, n: Long): CInt = extern
+  def okm_map_tensor(path: CString, offset: Long, nbytes: Long, dtype: CInt, shape: Ptr[CInt], ndim: CInt,
+      advise: CInt): Long = extern
   def okm_load_next(file: Long, key: Ptr[CString], value: Ptr[Long]): CInt = extern
   def okm_load_close(file: Long): Unit = extern
   def okm_save_safetensors(path: CString, names: Ptr[CString], arrays: Ptr[Long], n: CInt, keys: Ptr[CString],
@@ -104,6 +109,11 @@ private[mlx] object Okm:
   def asyncEval(a: Long): Int = C.okm_async_eval(a)
   def evalAll(as: Array[Long]): Int = C.okm_eval_all(as.at(0), as.length)
   def itemI32(a: Long): Int = C.okm_item_i32(a)
+  def toI32(a: Long, n: Int): Array[Int] = Zone.acquire { implicit z =>
+    val out = alloc[CInt](math.max(n, 1))
+    val got = C.okm_to_i32(a, out, n)
+    if got < 0 then null else Array.tabulate(math.min(got, n))(i => out(i))
+  }
   def itemF32(a: Long): Float = C.okm_item_f32(a)
   def fromI32(data: Array[Int], shape: Array[Int]): Long =
     withInts(shape)(s => C.okm_from_i32(data.at(0), s, shape.length))
@@ -194,8 +204,15 @@ private[mlx] object Okm:
     }
 
   def loadOpen(path: String): Long = Zone.acquire(implicit z => C.okm_load_open(toCString(path)))
-  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int]): Long =
-    Zone.acquire(implicit z => C.okm_map_tensor(toCString(path), offset, nbytes, dtype, cints(shape), shape.length))
+  def buffer(shape: Array[Int], dtype: Int): Long =
+    Zone.acquire(implicit z => C.okm_buffer(cints(shape), shape.length, dtype))
+  def openFd(path: String): Int = Zone.acquire(implicit z => C.okm_open_fd(toCString(path)))
+  def closeFd(fd: Int): Int = C.okm_close_fd(fd)
+  def readInto(fd: Int, dst: Long, dstOffset: Long, fileOffset: Long, n: Long): Int =
+    C.okm_read_into(fd, dst, dstOffset, fileOffset, n)
+  def mapTensor(path: String, offset: Long, nbytes: Long, dtype: Int, shape: Array[Int], advise: Boolean): Long =
+    Zone.acquire(implicit z => C.okm_map_tensor(toCString(path), offset, nbytes, dtype, cints(shape), shape.length,
+      if advise then 1 else 0))
   def loadNext(file: Long): (String, Long) | Null =
     val key = stackalloc[CString]()
     val value = stackalloc[Long]()

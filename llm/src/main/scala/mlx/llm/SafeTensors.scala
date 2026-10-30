@@ -25,9 +25,22 @@ object SafeTensors:
   def shards(dir: Path): Vector[Path] =
     Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(_.toString.endsWith(".safetensors")).sorted.toVector
 
-  def load(path: Path, mapped: Boolean, inPlace: Boolean = alignInPlace)(using Scope): Map[String, Arr] =
-    if mapped then map(if inPlace then alignInPlace(path) else alignedOf(path))
+  /** `cold`: tensors mapped without reading ahead — their pages read only as the GPU uses them */
+  def load(path: Path, mapped: Boolean, inPlace: Boolean = alignInPlace, cold: String => Boolean = _ => false)
+      (using Scope): Map[String, Arr] =
+    if mapped then map(if inPlace then alignInPlace(path) else alignedOf(path), cold)
     else Mlx.loadSafetensors(path.toString)
+
+  /** WHERE A TENSOR IS: its file (aligned, as `load` uses it), its bytes, type and shape */
+  final case class Located(path: Path, offset: Long, nbytes: Long, dtype: Dtype, shape: Vector[Int])
+
+  def locate(path: Path, inPlace: Boolean = alignInPlace): Map[String, Located] =
+    val file = if inPlace then alignInPlace(path) else alignedOf(path)
+    val h = header(file)
+    h.tensors.map { (name, t) =>
+      val Vector(from, to) = t("data_offsets").list.map(_.long): @unchecked
+      name -> Located(file, h.base + from, to - from, dtype(t("dtype").string), t("shape").list.map(_.int))
+    }.toMap
 
   /** unaligned files aligned where they are (MLX_SCALA_ALIGN=in-place), not copied */
   def alignInPlace: Boolean = sys.env.get("MLX_SCALA_ALIGN").contains("in-place")
@@ -60,12 +73,12 @@ object SafeTensors:
     finally f.close()
 
   /** each tensor over the file's pages */
-  def map(path: Path)(using Scope): Map[String, Arr] =
+  def map(path: Path, cold: String => Boolean = _ => false)(using Scope): Map[String, Arr] =
     val h = header(path)
     h.tensors.map { (name, t) =>
       val Vector(from, to) = t("data_offsets").list.map(_.long): @unchecked
       name -> Mlx.mapTensor(path.toString, h.base + from, to - from, dtype(t("dtype").string),
-        t("shape").list.map(_.int))
+        t("shape").list.map(_.int), readAhead = !cold(name))
     }.toMap
 
   def alignedRoot: Path = sys.env.get("MLX_SCALA_ALIGNED").map(Path.of(_))

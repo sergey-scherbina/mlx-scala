@@ -81,6 +81,30 @@ allows: in place (`inPlace = true`, MLX_SCALA_ALIGN=in-place: written beside it 
 itself, read as before by any reader), else as a copy written once under ~/.cache/mlx-scala/aligned
 (MLX_SCALA_ALIGNED).
 
+## Hot experts
+
+`Model.load(dir, mapped = true, expertSlots = 64)`: of a mixture of experts (Qwen3.6-35B-A3B: 256 a layer, 8 picked
+a token) each layer keeps 64 experts in memory, the rest left in the file (`ExpertCache`). A decode reads the
+router's picks to the CPU each layer, reads a missing expert from the file straight into the slot least recently
+used (`pread` into the buffer's own memory), and computes on the slots; a prompt — it uses nearly every expert —
+runs on the file's pages, mapped, as without the cache. Greedy tokens still mlx_lm's (64 and 16 a layer).
+
+Why a cache and not the OS's: Metal makes a buffer resident whole when a kernel uses it — a kernel reading 1% of a
+mapped GB brought in all of it — and a layer's experts are one tensor, used every token.
+
+Qwen3.6-35B-A3B, M4 Max, the files in the OS's cache, a short prompt, 512 tokens of a decode: an LRU of 32 a layer
+holds 67% of the picks, 64 82%, 128 93%; measured:
+
+| a layer | MLX's memory | hits | decode |
+|---|---|---|---|
+| 32 | 3.7 GB | 68% | 37 tok/s |
+| 64 | 5.9 GB | 83% | 45 tok/s |
+| 128 | 10.5 GB | 94.5% | 63 tok/s |
+| all 256 | 19.5 GB (the file's pages) | — | 119 tok/s |
+
+The price is the wait each layer for the router's picks: read every layer, the decode is ~70 tok/s at most. A
+6.2k-token prompt: 5.3 s with 64 a layer, 4.2 s with all.
+
 ## Measured
 
 Qwen3-4B (mlx-community, 4-bit), greedy, 256 tokens out, a different prompt each run; tokens a second, the median
