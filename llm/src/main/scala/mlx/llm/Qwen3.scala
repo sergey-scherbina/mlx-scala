@@ -182,11 +182,12 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
 
 object Qwen3:
   /** the model in a directory: config.json and its .safetensors shards — read, or mapped (`SafeTensors`) */
-  def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault): Qwen3 =
+  def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
+      inPlace: Boolean = SafeTensors.alignInPlace): Qwen3 =
     Mlx.init()
     val config = Qwen3Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
-    val weights = SafeTensors.shards(dir).flatMap(SafeTensors.load(_, mapped)).toMap
+    val weights = SafeTensors.shards(dir).flatMap(SafeTensors.load(_, mapped, inPlace)).toMap
     evalAll(weights.values.toSeq)
     new Qwen3(config, weights, own)

@@ -15,8 +15,9 @@ import mlx.*
  *
  * A tensor maps only where its bytes sit aligned for its type; MLX's writer does not pad the header, so in
  * mlx-community's files they sit off by the header's length, and MLX copies a tensor it cannot use where it is. Such
- * a file is mapped from an ALIGNED COPY — the same file, its header padded with spaces (as the format allows) —
- * written once under MLX_SCALA_ALIGNED, else ~/.cache/mlx-scala/aligned */
+ * a file is ALIGNED — the same file, its header padded with spaces (as the format allows): IN PLACE (MLX_SCALA_ALIGN=
+ * in-place: written beside it, then moved over it — HuggingFace's blob itself, readable as before by any reader,
+ * no disk spent), else as a COPY written once under MLX_SCALA_ALIGNED, else ~/.cache/mlx-scala/aligned */
 object SafeTensors:
   /** mapped when nothing says otherwise: MLX_SCALA_MMAP=1 */
   def mappedByDefault: Boolean = sys.env.get("MLX_SCALA_MMAP").contains("1")
@@ -24,8 +25,21 @@ object SafeTensors:
   def shards(dir: Path): Vector[Path] =
     Files.list(dir).toArray.map(_.asInstanceOf[Path]).filter(_.toString.endsWith(".safetensors")).sorted.toVector
 
-  def load(path: Path, mapped: Boolean)(using Scope): Map[String, Arr] =
-    if mapped then map(alignedOf(path)) else Mlx.loadSafetensors(path.toString)
+  def load(path: Path, mapped: Boolean, inPlace: Boolean = alignInPlace)(using Scope): Map[String, Arr] =
+    if mapped then map(if inPlace then alignInPlace(path) else alignedOf(path))
+    else Mlx.loadSafetensors(path.toString)
+
+  /** unaligned files aligned where they are (MLX_SCALA_ALIGN=in-place), not copied */
+  def alignInPlace: Boolean = sys.env.get("MLX_SCALA_ALIGN").contains("in-place")
+
+  /** the file aligned where it is (the file a link points to: HuggingFace's blob) — written beside it and moved
+   * over it, so a reader sees the old file or the new one, whole — and it returned */
+  def alignInPlace(path: Path): Path =
+    if !header(path).aligned then
+      val real = path.toRealPath()
+      System.err.println(s"[Info] $path: its tensors sit unaligned — aligned in place, once ($real)")
+      realign(real, real)
+    path
 
   /** a file's header: its tensors (dtype, shape, byte range after the header) and where the data starts */
   final case class Header(json: Json, base: Long):
@@ -75,7 +89,7 @@ object SafeTensors:
     val h = header(src)
     val n = h.base - 8
     val pad = ((-(h.base)) % 64 + 64) % 64
-    val tmp = dst.resolveSibling(dst.getFileName.toString + ".part")
+    val tmp = dst.resolveSibling(dst.getFileName.toString + ".aligning")
     val in = FileChannel.open(src, StandardOpenOption.READ)
     val out = FileChannel.open(tmp, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
       StandardOpenOption.TRUNCATE_EXISTING)

@@ -32,6 +32,23 @@ class SafeTensorsSuite extends munit.FunSuite:
       assertEquals(sum(reshape(multiply(diff, diff), -1), 0).eval().itemFloat, 0f)
     s.close()
 
+  test("an unaligned file aligned in place, through its link: the values as read"):
+    val dir = Files.createTempDirectory("safetensors")
+    given s: Scope = new Scope
+    val a = astype(ints(Array.range(0, 1000), 10, 100), Dtype.UInt32)
+    var key = "w"
+    val blob = dir.resolve("blob.safetensors")   // MLX names a file it writes so
+    while { saveSafetensors(blob.toString, Seq(key -> a)); SafeTensors.header(blob).aligned } do key = key + "x"
+    val link = Files.createSymbolicLink(dir.resolve("m.safetensors"), blob)
+    val before = loadSafetensors(link.toString)(key)
+    assertEquals(SafeTensors.alignInPlace(link), link)
+    assert(Files.isSymbolicLink(link) && SafeTensors.header(blob).aligned)
+    assert(Files.list(dir).toArray.length == 2, "nothing left beside it")
+    val mapped = SafeTensors.map(link)(key)
+    val diff = subtract(astype(mapped, Dtype.Float32), astype(before, Dtype.Float32))
+    assertEquals(sum(reshape(multiply(diff, diff), -1), 0).eval().itemFloat, 0f)
+    s.close()
+
   test("a model mapped: the tokens as read"):
     val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit")
     assume(dir.isDefined, "mlx-community/Qwen3-4B-4bit is not in the HuggingFace cache")

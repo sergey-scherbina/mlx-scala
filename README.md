@@ -76,8 +76,10 @@ still mlx_lm's.
 
 A tensor maps only where its bytes sit aligned for its type, and MLX's writer does not pad the header: in
 mlx-community's files every tensor sits off by the header's length (a uint32 off a multiple of 4), and MLX copies
-what it cannot use in place. Such a file is mapped from an aligned copy — the same file, its header padded with
-spaces, as the format allows — written once under ~/.cache/mlx-scala/aligned (MLX_SCALA_ALIGNED): disk for memory.
+what it cannot use in place. Such a file is aligned — the same file, its header padded with spaces, as the format
+allows: in place (`inPlace = true`, MLX_SCALA_ALIGN=in-place: written beside it and moved over it, HuggingFace's blob
+itself, read as before by any reader), else as a copy written once under ~/.cache/mlx-scala/aligned
+(MLX_SCALA_ALIGNED).
 
 ## Measured
 
