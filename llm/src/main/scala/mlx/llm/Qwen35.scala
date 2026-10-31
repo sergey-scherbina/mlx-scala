@@ -49,6 +49,12 @@ final class LinearState:
   def restore(snap: LinearState.Snap): Unit =
     conv = if snap.conv == null then null else snap.conv.nn.retain(own)
     state = if snap.state == null then null else snap.state.nn.retain(own)
+  /** back to a snapshot's: what it holds now let go */
+  def rewind(snap: LinearState.Snap): Unit =
+    val (c0, s0) = (conv, state)
+    restore(snap)
+    if c0 != null then own.release(c0.nn)
+    if s0 != null then own.release(s0.nn)
   def close(): Unit = own.close()
 
 object LinearState:
@@ -110,8 +116,11 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
               ahead._2.prefetch(g)
               p
           Qwen35.waitNanos += System.nanoTime() - t
-          val slots = cache.nn.slotsOf(picks)
-          squeeze(glu(x, astype(ints(slots, 1, n, k), Dtype.UInt32), sorted = false, hot.nn), -2)
+          // more experts at once than slots (guesses checked: a pass of several tokens): on all of them, mapped
+          if picks.distinct.length > cache.nn.slots then squeeze(glu(x, idx, sorted = false), -2)
+          else
+            val slots = cache.nn.slotsOf(picks)
+            squeeze(glu(x, astype(ints(slots, 1, n, k), Dtype.UInt32), sorted = false, hot.nn), -2)
       else
         val flat = reshape(idx, n * k)
         val order = argsort(flat, 0)
@@ -166,6 +175,19 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     def close(): Unit = caches.foreach { case c: KvCache => c.close(); case l: LinearState => l.close() }
     def snapshot(): Model.Snapshot = Snapshot(caches.map { case c: KvCache => c.snapshot(); case l: LinearState =>
       l.snapshot() })
+    // the caches' offsets, the recurrent states as they are (held: arrays do not change): those go back to here
+    // alone, the tokens kept fed again
+    def checkpoint(): Model.Checkpoint = Qwen35.Place(caches.map {
+      case c: KvCache => c.offset
+      case l: LinearState => l.snapshot()
+    })
+    def rewind(c: Model.Checkpoint, keep: Int): Boolean =
+      caches.zip(c.asInstanceOf[Qwen35.Place].at).foreach {
+        case (k: KvCache, o: Int) => k.offset = o
+        case (l: LinearState, s: LinearState.Snap) => l.rewind(s)
+        case _ => sys.error("a checkpoint of another state")
+      }
+      keep == 0
   private val linearBytes = 2L * (convKernel - 1) * (2 * linearKeyHeads * linearKeyDim + linearValueHeads *
     linearValueDim) + 4L * linearValueHeads * linearValueDim * linearKeyDim
   private final class Snapshot(val snaps: Vector[KvCache.Snap | LinearState.Snap], owner: Scope | Null = null)
@@ -272,7 +294,10 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       add(mixed, multiply(sigmoid(l.sharedRouter(x)), shared))
 
   /** each layer in a scope of its own, its output alone moved out (a handle held keeps its buffer) */
-  def logits(ids: Arr, state: Model.State)(using s: Scope): Arr =
+  def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state, all = true)
+  def logits(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state, all = false)
+
+  private def logits(ids: Arr, state: Model.State, all: Boolean)(using s: Scope): Arr =
     val caches = state.asInstanceOf[State].caches
     val n = ids.dim(1)
     var h = Scope(s)(reshape(embed.rows(reshape(ids, n)), 1, n, hidden))
@@ -291,7 +316,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       s.release(x)
       i += 1
     Scope(s) {
-      val last = if n == 1 then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
+      val last = if n == 1 || all then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
       head(rmsNorm(last, norm, eps))
     }
 
@@ -321,11 +346,15 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
   private[llm] def ahead: (Long, Long) =
     (hotExperts.values.map(_.prefetched).sum, hotExperts.values.map(_.prefetchedUsed).sum)
 
+  /** its weights freed, and MLX's buffers kept for reuse given back: the memory free for another model */
   def close(): Unit =
     hotExperts.values.foreach(_.close())
     own.close()
+    Mlx.clearCache()
 
 object Qwen35:
+  private final case class Place(at: Vector[Int | LinearState.Snap]) extends Model.Checkpoint:
+    def close(): Unit = at.foreach { case s: LinearState.Snap => s.close(); case _ => () }
   /** THE GATED DELTA RULE, a step a position: for each value head, state ← state·g; kv = state·k;
    * state += k ⊗ (v − kv)·β; y = state·q. MLX's mlx_lm kernel (gated_delta.py, MIT, Apple), unmasked, scalar gate */
   private[llm] val deltaRule = Kernel("okm_gated_delta_step", Seq("q", "k", "v", "g", "beta", "state_in", "T"),

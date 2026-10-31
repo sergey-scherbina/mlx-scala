@@ -130,6 +130,11 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   final class State(val caches: Vector[KvCache]) extends Model.State:
     def close(): Unit = caches.foreach(_.close())
     def snapshot(): Model.Snapshot = Snapshot(caches.map(_.snapshot()))
+    // a cache of keys and values goes back to any place: its offset
+    def checkpoint(): Model.Checkpoint = Qwen3.Offsets(caches.map(_.offset))
+    def rewind(c: Model.Checkpoint, keep: Int): Boolean =
+      caches.zip(c.asInstanceOf[Qwen3.Offsets].at).foreach((cache, o) => cache.offset = o + keep)
+      true
   private final class Snapshot(val snaps: Vector[KvCache.Snap], owner: Scope | Null = null) extends Model.Snapshot:
     def bytes: Long = snaps.map(_.bytes).sum
     def close(): Unit = { snaps.foreach(_.close()); if owner != null then owner.nn.close() }
@@ -143,6 +148,8 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
     st.caches.zip(snapshot.asInstanceOf[Snapshot].snaps).foreach((c, sn) => c.restore(sn))
     st
   def logits(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state.asInstanceOf[State].caches)
+  def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr =
+    logits(ids, state.asInstanceOf[State].caches, all = true)
 
   private def attention(l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =
     val offset = cache.offset
@@ -159,7 +166,7 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
    *
    * Each layer in a scope of its own, its output alone moved out: a handle held keeps MLX from freeing its buffer
    * once used — with every intermediate of a pass held, a 4096-token prompt peaked at 48.7 GB */
-  def logits(ids: Arr, cache: Vector[KvCache])(using s: Scope): Arr =
+  def logits(ids: Arr, cache: Vector[KvCache], all: Boolean = false)(using s: Scope): Arr =
     val n = ids.dim(1)
     var h = Scope(s)(reshape(embed.rows(reshape(ids, n)), 1, n, hidden))
     var i = 0
@@ -174,13 +181,18 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       s.release(x)
       i += 1
     Scope(s) {
-      val last = if n == 1 then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
+      val last = if n == 1 || all then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
       embed(rmsNorm(last, norm, eps))
     }
 
-  def close(): Unit = own.close()
+  /** its weights freed, and MLX's buffers kept for reuse given back: the memory free for another model */
+  def close(): Unit =
+    own.close()
+    Mlx.clearCache()
 
 object Qwen3:
+  private final case class Offsets(at: Vector[Int]) extends Model.Checkpoint:
+    def close(): Unit = ()
   /** the model in a directory: config.json and its .safetensors shards — read, or mapped (`SafeTensors`) */
   def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
       inPlace: Boolean = SafeTensors.alignInPlace): Qwen3 =

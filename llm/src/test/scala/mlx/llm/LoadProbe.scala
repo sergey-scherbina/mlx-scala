@@ -21,9 +21,10 @@ import mlx.*
   val prompt = chat.ask(text, Map("enable_thinking" -> false))
   println(s"PROMPT ${prompt.length} tokens")
   def decode(): (Double, Double) =
-    val s = Session(model, prompt, 128, _ => false)
+    val s = Session(model, prompt, 128, _ => false, guesses = sys.env.get("GUESSES").map(_.toInt).getOrElse(0))
     Iterator.continually(s.next()).takeWhile(_.isDefined).foreach(_ => ())
     s.close()
+    if s.passes > 0 then println(s"GUESS ${s.timing.tokens} tokens, ${s.passes} passes, ${s.taken} of ${s.guessed} taken")
     (s.timing.prefillNanos / 1e6, s.timing.decodePerSecond)
   val (first, _) = decode()
   Qwen35.waitNanos = 0L

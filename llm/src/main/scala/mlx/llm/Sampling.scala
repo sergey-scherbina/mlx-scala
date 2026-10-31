@@ -24,18 +24,24 @@ final case class Sampling(temperature: Double = 0, topP: Double = 1, topK: Int =
     if frequencyPenalty == 0 then presence else subtract(presence, multiply(counts, scalar(frequencyPenalty.toFloat)))
 
   /** the next token of logits [1, 1, V] (or [1, V]): [1, 1] */
-  def pick(logits: Arr)(using Scope): Arr =
+  def pick(logits: Arr)(using Scope): Arr = reshape(picks(logits), 1, 1)
+
+  /** a token drawn at each of m places, logits [1, m, V] (or [m, V]): [m]. Guesses checked by them: a guess taken
+   * when the draw at its place is it (probability p(guess)), and at the first not taken the draw is p without the
+   * guess — speculative sampling with a guesser that is sure, the draws' distribution as without guesses */
+  def picks(logits: Arr)(using Scope): Arr =
     val v = logits.dim(-1)
-    if greedy then reshape(argmax(logits, -1), 1, 1)
+    val m = logits.shape.product / v
+    if greedy then reshape(argmax(logits, -1), m)
     else
-      val l = astype(reshape(logits, 1, v), Dtype.Float32)
+      val l = astype(reshape(logits, m, v), Dtype.Float32)
       val inv = scalar((1.0 / temperature).toFloat)
-      if topK <= 0 && topP >= 1 then reshape(categorical(multiply(l, inv), -1), 1, 1)
+      if topK <= 0 && topP >= 1 then reshape(categorical(multiply(l, inv), -1), m)
       else
         // the candidates, likeliest first: the k (argpartition: the k largest, unordered), or all
         val (cand0, ids0) =
           if topK > 0 && topK < v then
-            val ids = slice(argpartition(negative(l), topK - 1, -1), Seq(0, 0), Seq(1, topK))
+            val ids = slice(argpartition(negative(l), topK - 1, -1), Seq(0, 0), Seq(m, topK))
             (takeAlong(l, ids, -1), ids)
           else
             val ids = argsort(negative(l), -1)
@@ -50,8 +56,8 @@ final case class Sampling(temperature: Double = 0, topP: Double = 1, topK: Int =
             val probs = softmax(multiply(cand, inv), -1)
             val before = subtract(cumsum(probs, -1), probs)
             where(greater(before, scalar(topP.toFloat)), scalar(Float.NegativeInfinity), cand)
-        val choice = reshape(categorical(multiply(kept, inv), -1), 1, 1)
-        takeAlong(ids, choice, -1)
+        val choice = reshape(categorical(multiply(kept, inv), -1), m, 1)
+        reshape(takeAlong(ids, choice, -1), m)
 
 object Sampling:
   val Greedy: Sampling = Sampling()

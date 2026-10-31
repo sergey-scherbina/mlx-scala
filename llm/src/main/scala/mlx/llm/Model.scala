@@ -14,6 +14,8 @@ trait Model:
   def snapshotOf(tensors: Map[String, Arr], meta: Map[String, String], owner: Scope): Model.Snapshot
   /** the next token's logits after `ids` [1, n], the state moved on by n */
   def logits(ids: Arr, state: Model.State)(using Scope): Arr
+  /** the logits after each of `ids` [1, n]: [1, n, V], the state moved on by n — n guesses checked in one pass */
+  def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr
   def close(): Unit
 
 object Model:
@@ -22,6 +24,14 @@ object Model:
     def close(): Unit
     /** the state as it is now, kept: a prompt's prefix not computed again (`PrefixCache`) */
     def snapshot(): Snapshot
+    /** where it is now, to come back to (`rewind`): guesses checked, some of them wrong */
+    def checkpoint(): Checkpoint
+    /** back to `c` with `keep` of the tokens fed since kept: true — or false when only `c` itself can be come back
+     * to (a recurrent state keeps no position but its last), the caller to feed those `keep` again */
+    def rewind(c: Checkpoint, keep: Int): Boolean
+  /** a state's place, kept for a while */
+  trait Checkpoint:
+    def close(): Unit
   /** a state kept: what it holds on the GPU, about */
   trait Snapshot:
     def bytes: Long

@@ -10,15 +10,27 @@
 #include <unistd.h>
 #include "mlx/c/mlx.h"
 
-static mlx_stream S, CPU;
-static char err[1024];
+// THE STREAMS, A THREAD'S OWN: MLX (0.32) keeps a stream to the thread that made it ("no Stream(gpu, 0) in current
+// thread" elsewhere) — each thread its own GPU and CPU streams, made as it first asks; its last error its own too
+static __thread int streams_made = 0;
+static __thread mlx_stream gpu_stream, cpu_stream;
+static mlx_stream stream_of(int gpu) {
+  if (!streams_made) {
+    gpu_stream = mlx_default_gpu_stream_new();
+    cpu_stream = mlx_default_cpu_stream_new();
+    streams_made = 1;
+  }
+  return gpu ? gpu_stream : cpu_stream;
+}
+#define S stream_of(1)
+#define CPU stream_of(0)
+static __thread char err[1024];
 
 static void on_error(const char* msg, void* data) { (void)data; strncpy(err, msg, sizeof err - 1); }
 
 int okm_init(void) {
   mlx_set_error_handler(on_error, NULL, NULL);
-  S = mlx_default_gpu_stream_new();
-  CPU = mlx_default_cpu_stream_new();
+  (void)stream_of(1);
   return 0;
 }
 const char* okm_error(void) { return err; }

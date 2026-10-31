@@ -47,7 +47,9 @@ lazy val mlx = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Ful
 lazy val llm = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Pure).in(file("llm")).dependsOn(mlx)
   .settings(name := "mlx-scala-llm",
     // JSON: the value alone, depending on nothing (okay-simple's okay-effects-json-value)
-    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json-value" % jsonValue, munit.value))
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json-value" % jsonValue, munit.value),
+    // one suite at a time: two suites loading Qwen3.6-35B at once is 39 GB (Scala Native's runner ran them so)
+    Test / parallelExecution := false)
   .jvmSettings(jvmNative)
   .nativeSettings(nativeLinking)
 
