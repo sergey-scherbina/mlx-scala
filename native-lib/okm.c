@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include "mlx/c/mlx.h"
 
@@ -392,4 +393,20 @@ int okm_read_into(int fd, void* dst, long dst_offset, long file_offset, long n) 
     done += r;
   }
   return 0;
+}
+
+// THE MACHINE'S MEMORY, as macOS tells it (no root): the pressure (1 normal, 2 warning, 4 critical) and the share of
+// memory free (%); -1 when it does not
+static int sysctl_int(const char* name) {
+  int v = 0; size_t n = sizeof v;
+  return sysctlbyname(name, &v, &n, NULL, 0) == 0 ? v : -1;
+}
+int okm_memory_pressure(void) { return sysctl_int("kern.memorystatus_vm_pressure_level"); }
+int okm_memory_free_percent(void) { return sysctl_int("kern.memorystatus_level"); }
+// the room for a file's pages: free, speculative and file-backed pages (the OS's cache gives those up first), bytes
+long okm_memory_room(void) {
+  int page = sysctl_int("hw.pagesize"), f = sysctl_int("vm.page_free_count"),
+      sp = sysctl_int("vm.page_speculative_count"), ext = sysctl_int("vm.page_pageable_external_count");
+  if (page < 0 || f < 0 || sp < 0 || ext < 0) return -1;
+  return ((long)f + sp + ext) * page;
 }

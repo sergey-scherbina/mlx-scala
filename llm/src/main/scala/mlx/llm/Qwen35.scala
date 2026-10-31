@@ -36,6 +36,32 @@ final class LinearState:
   private val own = new Scope
   var conv: Arr | Null = null
   var state: Arr | Null = null
+  /** guesses being checked: the next pass keeps each position's state (`record`) */
+  var recording = false
+  private var steps: Arr | Null = null
+  private var input: Arr | Null = null
+  private var window = 0
+  /** a pass's states after each position [1, n, Hv, Dv, Dk], and its convolution's input (the window before it, then
+   * its own) — to go back to after any of its positions */
+  def record(steps: Arr, input: Arr, kernel: Int): Unit =
+    forget()
+    this.steps = steps.moveTo(own)
+    this.input = input.moveTo(own)
+    window = kernel - 1
+  def recorded: Boolean = steps != null
+  /** back to after the pass's position `j` (0-based): its state, the convolution's window then */
+  def backTo(j: Int)(using Scope): Unit =
+    val sh = steps.nn.shape
+    val at = reshape(slice(steps.nn, Seq(0, j, 0, 0, 0), Seq(1, j + 1, sh(2), sh(3), sh(4))), 1, sh(2), sh(3), sh(4))
+    val in = input.nn
+    val c = contiguous(slice(in, Seq(0, j + 1, 0), Seq(1, j + 1 + window, in.dim(2))))
+    keep(c, contiguous(at))
+    forget()
+  def forget(): Unit =
+    if steps != null then own.release(steps.nn)
+    if input != null then own.release(input.nn)
+    steps = null
+    input = null
   def keep(conv: Arr, state: Arr): Unit =
     val (c0, s0) = (this.conv, this.state)
     this.conv = conv.moveTo(own)
@@ -177,17 +203,26 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       l.snapshot() })
     // the caches' offsets, the recurrent states as they are (held: arrays do not change): those go back to here
     // alone, the tokens kept fed again
-    def checkpoint(): Model.Checkpoint = Qwen35.Place(caches.map {
-      case c: KvCache => c.offset
-      case l: LinearState => l.snapshot()
-    })
+    def checkpoint(): Model.Checkpoint =
+      caches.foreach { case l: LinearState => l.recording = true; case _ => () }
+      Qwen35.Place(caches.map {
+        case c: KvCache => c.offset
+        case l: LinearState => l.snapshot()
+      }, this)
     def rewind(c: Model.Checkpoint, keep: Int): Boolean =
+      val exact = keep > 0 && caches.forall { case l: LinearState => l.recorded; case _ => true }
+      // the steps' slices made in a scope of their own: what each state keeps moved out of it
+      val sc = new Scope
+      given Scope = sc
       caches.zip(c.asInstanceOf[Qwen35.Place].at).foreach {
-        case (k: KvCache, o: Int) => k.offset = o
-        case (l: LinearState, s: LinearState.Snap) => l.rewind(s)
+        case (k: KvCache, o: Int) => k.offset = if exact then o + keep else o
+        case (l: LinearState, snap: LinearState.Snap) => if exact then l.backTo(keep - 1) else l.rewind(snap)
         case _ => sys.error("a checkpoint of another state")
       }
-      keep == 0
+      sc.close()
+      exact || keep == 0
+    private[llm] def stopRecording(): Unit =
+      caches.foreach { case l: LinearState => l.recording = false; l.forget(); case _ => () }
   private val linearBytes = 2L * (convKernel - 1) * (2 * linearKeyHeads * linearKeyDim + linearValueHeads *
     linearValueDim) + 4L * linearValueHeads * linearValueDim * linearKeyDim
   private final class Snapshot(val snaps: Vector[KvCache.Snap | LinearState.Snap], owner: Scope | Null = null)
@@ -260,14 +295,23 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       else st.state.nn
     // the packed kernel where it fits (Dk 128: eight value rows a SIMD-group), as mlx_lm; else the generic one
     val packed = Qwen35.packedAllowed && linearKeyDim == 128 && linearValueDim % 8 == 0
+    // guesses checked (the state recording): each position's state kept too, to go back to
+    val steps = st.recording && n > 1
     val (kernel, grid, group) =
-      if packed then (Qwen35.deltaRulePacked, (32, linearValueDim / 8, linearValueHeads), (32, 2, 1))
-      else (Qwen35.deltaRule, (32, linearValueDim, linearValueHeads), (32, 4, 1))
-    val Vector(y, next) = kernel(Seq(q, k, v, g, beta, state, int(n)), Seq(Seq(1, n, linearValueHeads,
-      linearValueDim), Seq(1, linearValueHeads, linearValueDim, linearKeyDim)), Seq(x.dtype, Dtype.Float32),
+      if packed then
+        (if steps then Qwen35.deltaRulePackedSteps else Qwen35.deltaRulePacked,
+          (32, linearValueDim / 8, linearValueHeads), (32, 2, 1))
+      else (if steps then Qwen35.deltaRuleSteps else Qwen35.deltaRule, (32, linearValueDim, linearValueHeads),
+        (32, 4, 1))
+    val stateShape = Seq(1, linearValueHeads, linearValueDim, linearKeyDim)
+    val outs = kernel(Seq(q, k, v, g, beta, state, int(n)), Seq(Seq(1, n, linearValueHeads, linearValueDim),
+      stateShape) ++ (if steps then Seq(1 +: n +: stateShape.tail) else Nil),
+      Seq(x.dtype, Dtype.Float32) ++ (if steps then Seq(Dtype.Float32) else Nil),
       grid, group, Seq("InT" -> x.dtype, "StT" -> Dtype.Float32, "Dk" -> linearKeyDim, "Dv" -> linearValueDim,
-      "Hk" -> linearKeyHeads, "Hv" -> linearValueHeads)): @unchecked
-    st.keep(keep, next)
+      "Hk" -> linearKeyHeads, "Hv" -> linearValueHeads))
+    val y = outs(0)
+    st.keep(keep, outs(1))
+    if steps then st.record(outs(2), input, convKernel)
     // the gated RMS norm: silu(z) · norm(y), in float32
     val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
     l.out(reshape(gated, 1, n, valueDim))
@@ -353,12 +397,13 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     Mlx.clearCache()
 
 object Qwen35:
-  private final case class Place(at: Vector[Int | LinearState.Snap]) extends Model.Checkpoint:
-    def close(): Unit = at.foreach { case s: LinearState.Snap => s.close(); case _ => () }
+  private final case class Place(at: Vector[Int | LinearState.Snap], state: Qwen35#State) extends Model.Checkpoint:
+    def close(): Unit =
+      at.foreach { case s: LinearState.Snap => s.close(); case _ => () }
+      state.stopRecording()
   /** THE GATED DELTA RULE, a step a position: for each value head, state ← state·g; kv = state·k;
    * state += k ⊗ (v − kv)·β; y = state·q. MLX's mlx_lm kernel (gated_delta.py, MIT, Apple), unmasked, scalar gate */
-  private[llm] val deltaRule = Kernel("okm_gated_delta_step", Seq("q", "k", "v", "g", "beta", "state_in", "T"),
-    Seq("y", "state_out"), """
+  private val deltaRuleSource = """
         auto n = thread_position_in_grid.z;
         auto b_idx = n / Hv;
         auto hv_idx = n % Hv;
@@ -409,7 +454,9 @@ object Qwen35:
           auto s_idx = n_per_t * dk_idx + i;
           o_state[s_idx] = static_cast<StT>(state[i]);
         }
-    """)
+    """
+  private[llm] val deltaRule = Kernel("okm_gated_delta_step", Seq("q", "k", "v", "g", "beta", "state_in", "T"),
+    Seq("y", "state_out"), deltaRuleSource)
 
   /** MLX_SCALA_GDN=unpacked: the generic kernel everywhere (an A/B) */
   /** WHO SEES THE ROUTING: each MoE layer's chosen experts (layer, n·k ids), read as they are chosen — a probe's
@@ -424,8 +471,7 @@ object Qwen35:
   /** THE GATED DELTA RULE, Dk = 128: eight value rows packed in a SIMD-group, four lanes a row, each lane 32 state
    * elements in registers; the reductions in the generic kernel's order, so the numbers are its numbers. MLX's
    * mlx_lm (gated_delta.py, `_make_gated_delta_packed_kernel`, MIT, Apple) */
-  private[llm] val deltaRulePacked = Kernel("okm_gated_delta_step_packed",
-    Seq("q", "k", "v", "g", "beta", "state_in", "T"), Seq("y", "state_out"), """
+  private val deltaRulePackedSource = """
         constexpr int lanes_per_row = 4;
         constexpr int rows_per_simdgroup = 32 / lanes_per_row;
         constexpr int values_per_lane = Dk / lanes_per_row;
@@ -498,7 +544,27 @@ object Qwen35:
         for (int i = 0; i < values_per_lane; ++i) {
           o_state[i] = static_cast<StT>(state[i]);
         }
-    """)
+    """
+  private[llm] val deltaRulePacked = Kernel("okm_gated_delta_step_packed",
+    Seq("q", "k", "v", "g", "beta", "state_in", "T"), Seq("y", "state_out"), deltaRulePackedSource)
+
+  /** THE SAME, EACH STEP'S STATE KEPT too: `steps` [B, T, Hv, Dv, Dk], the state after each position — guesses
+   * checked, a recurrent state goes back to any of them (not the pass computed again) */
+  private val marker = "          q_ += Hk * Dk;"
+  private[llm] val deltaRuleSteps = Kernel("okm_gated_delta_step_steps",
+    Seq("q", "k", "v", "g", "beta", "state_in", "T"), Seq("y", "state_out", "steps"),
+    deltaRuleSource.replace(marker, """          for (int i = 0; i < n_per_t; ++i) {
+            auto s_idx = n_per_t * dk_idx + i;
+            steps[(((b_idx * T + t) * Hv + hv_idx) * Dv + dv_idx) * Dk + s_idx] = state[i];
+          }
+""" + marker))
+  private[llm] val deltaRulePackedSteps = Kernel("okm_gated_delta_step_packed_steps",
+    Seq("q", "k", "v", "g", "beta", "state_in", "T"), Seq("y", "state_out", "steps"),
+    deltaRulePackedSource.replace(marker, """          for (int i = 0; i < values_per_lane; ++i) {
+            steps[(((b_idx * T + t) * Hv + hv_idx) * Dv + dv_idx) * Dk + lane_in_row * values_per_lane + i] =
+                state[i];
+          }
+""" + marker))
 
   /** the model in a directory: config.json and its shards — the language model's weights alone (not the vision
    * tower's, nor the multi-token predictor's) */

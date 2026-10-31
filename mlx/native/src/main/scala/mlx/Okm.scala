@@ -75,6 +75,9 @@ private object C:
   def okm_sdpa(q: Long, k: Long, v: Long, scale: CFloat, causal: CInt): Long = extern
   def okm_load_open(path: CString): Long = extern
   def okm_buffer(shape: Ptr[CInt], ndim: CInt, dtype: CInt): Long = extern
+  def okm_memory_pressure(): CInt = extern
+  def okm_memory_free_percent(): CInt = extern
+  def okm_memory_room(): Long = extern
   def okm_open_fd(path: CString): CInt = extern
   def okm_close_fd(fd: CInt): CInt = extern
   def okm_read_into(fd: CInt, dst: Long, dstOffset: Long, fileOffset: Long, n: Long): CInt = extern
@@ -207,6 +210,9 @@ private[mlx] object Okm:
     }
 
   def loadOpen(path: String): Long = Zone.acquire(implicit z => C.okm_load_open(toCString(path)))
+  def memoryPressure(): Int = C.okm_memory_pressure()
+  def memoryFreePercent(): Int = C.okm_memory_free_percent()
+  def memoryRoom(): Long = C.okm_memory_room()
   def buffer(shape: Array[Int], dtype: Int): Long =
     Zone.acquire(implicit z => C.okm_buffer(cints(shape), shape.length, dtype))
   def openFd(path: String): Int = Zone.acquire(implicit z => C.okm_open_fd(toCString(path)))

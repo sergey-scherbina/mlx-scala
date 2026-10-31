@@ -117,8 +117,9 @@ halved (1.9 s → 0.9 s of a 10.7 s decode) — and the wait for the picks, two 
 followed them (prompt lookup: an agent rewrites what it has read) — and up to 6 checked in one pass, taken while
 the model's picks agree. Greedy, the tokens greedy's; drawn, a guess is taken when the draw at its place is it, and
 the first draw that is not is p without the guess — speculative sampling, the distribution unchanged. Wrong guesses
-undone: a cache of keys and values goes back by its offset, a recurrent state (Qwen3.5/3.6's Gated DeltaNet) back to
-before the pass and the tokens taken fed again. A guess is tried only where the last two tokens were before
+undone: a cache of keys and values goes back by its offset, a recurrent state (Qwen3.5/3.6's Gated DeltaNet) to the
+state after the last token taken — the pass's kernel keeps each position's state (`steps`), so nothing is computed
+again (Qwen3.5-9B: 116 tok/s; fed again, 103–110). A guess is tried only where the last two tokens were before
 together, and after a pass taking none they rest, longer each time — a text that repeats nothing is not slowed.
 
 Rewriting a piece of code it was given, M4 Max: Qwen3-4B 134 → 203 tok/s, Qwen3.5-9B 69 → 110, Qwen3.6-35B-A3B

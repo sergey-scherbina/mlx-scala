@@ -96,6 +96,9 @@ private[mlx] object Okm:
   private val hLoadOpen = fn("okm_load_open", J, J)
   private val hMapTensor = fn("okm_map_tensor", J, J, J, J, I, J, I, I)
   private val hBuffer = fn("okm_buffer", J, J, I, I)
+  private val hPressure = fn("okm_memory_pressure", I)
+  private val hFreePercent = fn("okm_memory_free_percent", I)
+  private val hRoom = fn("okm_memory_room", J)
   private val hOpenFd = fn("okm_open_fd", I, J)
   private val hCloseFd = fn("okm_close_fd", I, I)
   private val hReadInto = fn("okm_read_into", I, I, J, J, J, J)
@@ -241,6 +244,9 @@ private[mlx] object Okm:
         if advise then 1 else 0)
       r
     finally arena.close()
+  def memoryPressure(): Int = hPressure.invokeExact()
+  def memoryFreePercent(): Int = hFreePercent.invokeExact()
+  def memoryRoom(): Long = hRoom.invokeExact()
   def buffer(shape: Array[Int], dtype: Int): Long = hBuffer.invokeExact(ints(0, shape), shape.length, dtype)
   def openFd(path: String): Int =
     val arena = Arena.ofConfined()

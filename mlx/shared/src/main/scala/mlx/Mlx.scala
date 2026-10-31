@@ -220,6 +220,13 @@ object Mlx:
   def exportDot(a: Arr, path: String): Unit = check(Okm.exportDot(a.h, path))
 
   def activeMemory: Long = Okm.activeMemory()
+  /** THE MACHINE'S MEMORY, as macOS tells it: the pressure — 1 normal, 2 warning, 4 critical (-1: not told) — and the
+   * share of it free, % */
+  def memoryPressure: Int = Okm.memoryPressure()
+  def memoryFreePercent: Int = Okm.memoryFreePercent()
+  /** the room a mapped file's pages have: free, speculative and file-backed pages (the OS's cache), bytes — a mapped
+   * model larger than this pages in and out (the pressure may still say normal: others' memory compressed) */
+  def memoryRoom: Long = Okm.memoryRoom()
   /** the buffers MLX keeps for reuse freed: after a model is closed, its memory given back */
   def clearCache(): Unit = check(Okm.clearCache())
   def peakMemory: Long = Okm.peakMemory()
