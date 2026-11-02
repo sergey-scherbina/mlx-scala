@@ -325,6 +325,9 @@ long okm_active_memory(void) { size_t r = 0; mlx_get_active_memory(&r); return (
 long okm_peak_memory(void) { size_t r = 0; mlx_get_peak_memory(&r); return (long)r; }
 // the buffers MLX keeps for reuse, given back (after a model is closed: its memory free for the next)
 int okm_clear_cache(void) { return mlx_clear_cache(); }
+// the bytes MLX keeps for reuse now; the most it may keep (beyond it a freed buffer is given back), the old limit back
+long okm_cache_memory(void) { size_t r = 0; mlx_get_cache_memory(&r); return (long)r; }
+long okm_set_cache_limit(long limit) { size_t r = 0; mlx_set_cache_limit(&r, (size_t)limit); return (long)r; }
 
 // A TENSOR OF A FILE, MAPPED: bytes [offset, offset + nbytes) of the file, an array of `dtype` and `shape` over the
 // file's own pages — no copy: Metal wraps page-aligned memory as it is (newBuffer bytesNoCopy), the tensor a view

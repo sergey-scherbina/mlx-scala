@@ -229,6 +229,11 @@ object Mlx:
   def memoryRoom: Long = Okm.memoryRoom()
   /** the buffers MLX keeps for reuse freed: after a model is closed, its memory given back */
   def clearCache(): Unit = check(Okm.clearCache())
+  /** the bytes MLX keeps for reuse now (freed buffers, not given back) */
+  def cacheMemory: Long = Okm.cacheMemory()
+  /** the most MLX keeps for reuse: beyond it a freed buffer is given back (MLX's default: its memory limit — a long
+   * prompt's buffers kept whole, gigabytes, after it); the old limit back */
+  def setCacheLimit(bytes: Long): Long = Okm.setCacheLimit(bytes)
   def peakMemory: Long = Okm.peakMemory()
 
 /** A CUSTOM METAL KERNEL: its source, run on arrays — MLX's `fast.metal_kernel`. Applied with its outputs' shapes and

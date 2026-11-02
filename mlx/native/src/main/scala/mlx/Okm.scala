@@ -89,6 +89,8 @@ private object C:
       values: Ptr[CString], m: CInt): CInt = extern
   def okm_active_memory(): Long = extern
   def okm_clear_cache(): CInt = extern
+  def okm_cache_memory(): Long = extern
+  def okm_set_cache_limit(limit: Long): Long = extern
   def okm_export_dot(a: Long, path: CString): CInt = extern
   def okm_peak_memory(): Long = extern
 
@@ -237,5 +239,7 @@ private[mlx] object Okm:
     }
   def activeMemory(): Long = C.okm_active_memory()
   def clearCache(): Int = C.okm_clear_cache()
+  def cacheMemory(): Long = C.okm_cache_memory()
+  def setCacheLimit(limit: Long): Long = C.okm_set_cache_limit(limit)
   def exportDot(a: Long, path: String): Int = Zone.acquire(implicit z => C.okm_export_dot(a, toCString(path)))
   def peakMemory(): Long = C.okm_peak_memory()

@@ -27,3 +27,11 @@ class MlxSuite extends munit.FunSuite:
     assertEquals(outer.size, 1)
     assertEquals(kept.eval().itemFloat, 3f)
     outer.close()
+
+  test("the buffers MLX keeps for reuse: bounded by the limit set, given back when cleared"):
+    val before = Mlx.setCacheLimit(0L)
+    Scope(new Scope) { add(scalar(1f), scalar(2f)) }.eval()
+    assertEquals(Mlx.cacheMemory, 0L)          // a limit of nothing: a freed buffer given back at once
+    assertEquals(Mlx.setCacheLimit(before), 0L) // the old limit back, this one's told
+    Mlx.clearCache()
+    assertEquals(Mlx.cacheMemory, 0L)
