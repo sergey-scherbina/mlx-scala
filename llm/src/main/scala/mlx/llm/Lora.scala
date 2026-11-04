@@ -106,6 +106,27 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
   def detach(): Unit =
     model.lora = Map.empty
     model.training(false)
+  /** the adapters written as safetensors: `<layer>.<proj>.a` and `.b`, and `lora.scale` */
+  def save(path: String): Unit =
+    val s = new Scope
+    try
+      val tensors = names.zipWithIndex.flatMap((n, k) => Seq(s"$n.a" -> params(2 * k), s"$n.b" -> params(2 * k + 1))) :+
+        ("lora.scale" -> scalar(alpha / rank)(using s))
+      saveSafetensors(path, tensors, Map("kind" -> "lora", "rank" -> rank.toString, "alpha" -> alpha.toString))
+    finally s.close()
+
   def close(): Unit =
     detach()
     keep.close()
+
+object Lora:
+  /** an adapter saved by `save`, put on the model for generation: its scope (close it, and take the adapter off
+   * with `model.lora = Map.empty`, when done) */
+  def attach(model: Adaptable, path: String): Scope =
+    val s = new Scope
+    val t = loadSafetensors(path)(using s)
+    val names = t.keys.filter(_.endsWith(".a")).map(_.stripSuffix(".a"))
+    model.lora = names.map(n => n -> (t(s"$n.a"), t(s"$n.b"))).toMap
+    model.loraScale = t("lora.scale").itemFloat
+    model.training(false)
+    s

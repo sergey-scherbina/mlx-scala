@@ -1,10 +1,14 @@
 package mlx.llm
 
-/** LoRA on Qwen3-4B: the adapters start as nothing (the loss the model's own), and steps on an example lower it */
+import mlx.*
+import mlx.Mlx.*
+
+/** LoRA on Qwen3-4B: the adapters start as nothing (the loss the model's own), steps on an example lower it, and the
+ * adapter saved and attached again gives the same logits */
 class LoraSuite extends munit.FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(20, "min")
 
-  test("Qwen3-4B: twenty AdamW steps on one example lower its loss"):
+  test("Qwen3-4B: twenty AdamW steps on one example lower its loss; saved and attached, the same logits"):
     val dir = Models.snapshot("mlx-community/Qwen3-4B-4bit")
     assume(dir.isDefined, "Qwen3-4B is not in the HuggingFace cache")
     val chat = Chat.load(dir.get)
@@ -14,6 +18,11 @@ class LoraSuite extends munit.FunSuite:
     val answer = chat.tokenizer.encode(
       "```scala\ndef isImpure(symbol: String): Boolean = Equivalence.impure.exists(symbol.startsWith)\n```")
     val ids = prompt ++ answer
+    def last(): Array[Float] =
+      val s = new Scope
+      val st = model.newState()
+      try astype(model.logits(ints(prompt, 1, prompt.length)(using s), st)(using s), Dtype.Float32)(using s).toFloats
+      finally { st.close(); s.close() }
     val lora = Lora(model, rank = 8, lr = 1e-3f)
     println(s"adapters: ${lora.names.size}, ${lora.size} parameters")
     val first = lora.evaluate(ids, prompt.length)
@@ -24,5 +33,15 @@ class LoraSuite extends munit.FunSuite:
       f"(${(System.nanoTime - t0) / 1e9 / 20}%.2f s a step)")
     assertEqualsFloat(losses.head, first, 1e-3f) // B = 0: the first step's loss is the model's own
     assert(after < first / 2, s"$first → $after")
+    lora.attachTrained()
+    val trained = last()
+    val file = java.nio.file.Files.createTempFile("lora", ".safetensors")
+    lora.save(file.toString)
     lora.close()
+    val held = Lora.attach(model, file.toString)
+    val loaded = last()
+    held.close()
+    model.lora = Map.empty
+    val diff = trained.indices.map(i => math.abs(trained(i) - loaded(i))).max
+    assert(diff < 1e-3f, s"saved and attached: logits differ by $diff")
     model.close()
