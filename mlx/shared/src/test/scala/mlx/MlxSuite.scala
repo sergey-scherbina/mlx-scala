@@ -59,6 +59,27 @@ class MlxSuite extends munit.FunSuite:
     assertEqualsFloat(b, 1f, 1e-2f)
     s.close()
 
+  test("conv2d: a 3 x 3 convolution, padded, as the sum says; its gradient flows"):
+    val s = new Scope
+    given Scope = s
+    val (h, w, ci, co) = (4, 5, 2, 3)
+    val xs = Array.tabulate(h * w * ci)(i => ((i * 7) % 11 - 5) / 4f)
+    val ws = Array.tabulate(co * 9 * ci)(i => ((i * 5) % 13 - 6) / 8f)
+    val y = conv2d(floats(xs, 1, h, w, ci), floats(ws, co, 3, 3, ci), padding = 1).toFloats
+    for r <- 0 until h; c <- 0 until w; o <- 0 until co do
+      var e = 0f
+      for dr <- 0 until 3; dc <- 0 until 3; i <- 0 until ci do
+        val (rr, cc) = (r + dr - 1, c + dc - 1)
+        if rr >= 0 && rr < h && cc >= 0 && cc < w then
+          e += xs((rr * w + cc) * ci + i) * ws(((o * 3 + dr) * 3 + dc) * ci + i)
+      assertEqualsFloat(y((r * w + c) * co + o), e, 1e-4f)
+    val (_, g) = valueAndGrad(Seq(floats(ws, co, 3, 3, ci)), Seq(0))(a =>
+      sum(reshape(conv2d(floats(xs, 1, h, w, ci), a(0), padding = 1), h * w * co), 0))
+    assertEquals(g(0).shape, Vector(co, 3, 3, ci))
+    // d(sum)/d w[o, 1, 1, i] = the sum of channel i over the board (the centre tap sees every point)
+    assertEqualsFloat(g(0).toFloats((1 * 3 + 1) * ci), (0 until h * w).map(p => xs(p * ci)).sum, 1e-4f)
+    s.close()
+
   test("a scope frees what it made; a result moved out is kept"):
     val outer = new Scope
     val kept = Scope(outer) { add(scalar(1f), scalar(2f)) }

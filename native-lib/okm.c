@@ -142,6 +142,9 @@ void* okm_take_along(void* a, void* idx, int axis) { RET(mlx_take_along_axis(&r,
 void* okm_conv1d(void* x, void* w, int stride, int padding, int dilation, int groups) {
   RET(mlx_conv1d(&r, A(x), A(w), stride, padding, dilation, groups, S));
 }
+void* okm_conv2d(void* x, void* w, int stride, int padding) {
+  RET(mlx_conv2d(&r, A(x), A(w), stride, stride, padding, padding, 1, 1, 1, S));
+}
 void* okm_scalar_i32(int v) { return mlx_array_new_int(v).ctx; }
 
 // sampling

@@ -91,6 +91,7 @@ private[mlx] object Okm:
   private val hArgsort = fn("okm_argsort", J, J, I)
   private val hTakeAlong = fn("okm_take_along", J, J, J, I)
   private val hConv1d = fn("okm_conv1d", J, J, J, I, I, I, I)
+  private val hConv2d = fn("okm_conv2d", J, J, J, I, I)
   private val hScalarI32 = fn("okm_scalar_i32", J, I)
   private val hGatherQmm = fn("okm_gather_qmm", J, J, J, J, J, J, I, I, I, I)
   private val hKernelNew = fn("okm_kernel_new", J, J, J, I, J, I, J, J)
@@ -271,6 +272,7 @@ private[mlx] object Okm:
   def takeAlong(a: Long, idx: Long, axis: Int): Long = hTakeAlong.invokeExact(a, idx, axis)
   def conv1d(x: Long, w: Long, stride: Int, padding: Int, dilation: Int, groups: Int): Long =
     hConv1d.invokeExact(x, w, stride, padding, dilation, groups)
+  def conv2d(x: Long, w: Long, stride: Int, padding: Int): Long = hConv2d.invokeExact(x, w, stride, padding)
   def scalarI32(v: Int): Long = hScalarI32.invokeExact(v)
   def gatherQmm(x: Long, w: Long, scales: Long, biases: Long, rhs: Long, transpose: Boolean, groupSize: Int,
       bits: Int, sorted: Boolean): Long =

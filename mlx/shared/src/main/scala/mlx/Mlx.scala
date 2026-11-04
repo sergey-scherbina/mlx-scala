@@ -153,6 +153,9 @@ object Mlx:
   /** a 1-D convolution: x [batch, length, channels], w [out, kernel, in / groups] */
   def conv1d(x: Arr, w: Arr, stride: Int = 1, padding: Int = 0, dilation: Int = 1, groups: Int = 1)(
     using s: Scope): Arr = s.own(Okm.conv1d(x.h, w.h, stride, padding, dilation, groups))
+  /** a 2-D convolution, the same stride and padding on both axes: x [batch, height, width, channels], w [out, kh, kw, in] */
+  def conv2d(x: Arr, w: Arr, stride: Int = 1, padding: Int = 0)(using s: Scope): Arr =
+    s.own(Okm.conv2d(x.h, w.h, stride, padding))
   def int(v: Int)(using s: Scope): Arr = s.own(Okm.scalarI32(v))
 
   /** experts' quantized weights by index: x · w[indices]ᵀ — a mixture of experts' layer */

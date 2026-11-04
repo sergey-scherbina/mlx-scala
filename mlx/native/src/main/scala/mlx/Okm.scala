@@ -69,6 +69,7 @@ private object C:
   def okm_argsort(a: Long, axis: CInt): Long = extern
   def okm_take_along(a: Long, idx: Long, axis: CInt): Long = extern
   def okm_conv1d(x: Long, w: Long, stride: CInt, padding: CInt, dilation: CInt, groups: CInt): Long = extern
+  def okm_conv2d(x: Long, w: Long, stride: CInt, padding: CInt): Long = extern
   def okm_scalar_i32(v: CInt): Long = extern
   def okm_gather_qmm(x: Long, w: Long, s: Long, b: Long, rhs: Long, transpose: CInt, gs: CInt, bits: CInt,
       sorted: CInt): Long = extern
@@ -222,6 +223,7 @@ private[mlx] object Okm:
   def takeAlong(a: Long, idx: Long, axis: Int): Long = C.okm_take_along(a, idx, axis)
   def conv1d(x: Long, w: Long, stride: Int, padding: Int, dilation: Int, groups: Int): Long =
     C.okm_conv1d(x, w, stride, padding, dilation, groups)
+  def conv2d(x: Long, w: Long, stride: Int, padding: Int): Long = C.okm_conv2d(x, w, stride, padding)
   def scalarI32(v: Int): Long = C.okm_scalar_i32(v)
   def gatherQmm(x: Long, w: Long, scales: Long, biases: Long, rhs: Long, transpose: Boolean, groupSize: Int,
       bits: Int, sorted: Boolean): Long =
