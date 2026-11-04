@@ -122,6 +122,9 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
     val down: QLinear = lin(s"$p.mlp.down_proj")
 
   private val blocks = Vector.tabulate(layers)(Layer(_))
+  /** after each layer, the residual stream [1, n, hidden] to a hook: read (a direction measured) or changed (steered);
+   * none by default */
+  var hook: Qwen3.Hook | Null = null
   private val embed = lin("model.embed_tokens")
   private val norm = w("model.norm.weight")
   private val scale = (1.0 / math.sqrt(headDim)).toFloat
@@ -176,7 +179,8 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       h = Scope(s) {
         val a = add(x, attention(l, rmsNorm(x, l.inNorm, eps), n, cache(i)))
         val m = rmsNorm(a, l.postNorm, eps)
-        add(a, l.down(multiply(silu(l.gate(m)), l.up(m))))
+        val out = add(a, l.down(multiply(silu(l.gate(m)), l.up(m))))
+        if hook == null then out else hook.nn.after(i, out)
       }
       s.release(x)
       i += 1
@@ -191,6 +195,9 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
     Mlx.clearCache()
 
 object Qwen3:
+  /** a hook on the residual stream: after layer `layer`, `h` [1, n, hidden] — what to go on with */
+  trait Hook:
+    def after(layer: Int, h: Arr)(using Scope): Arr
   private final case class Offsets(at: Vector[Int]) extends Model.Checkpoint:
     def close(): Unit = ()
   /** the model in a directory: config.json and its .safetensors shards — read, or mapped (`SafeTensors`) */
