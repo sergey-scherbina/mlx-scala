@@ -22,6 +22,9 @@ object Qwen3Config:
 /** a linear layer with quantized weights: x · wᵀ */
 final class QLinear(w: Arr, scales: Arr, biases: Arr, groupSize: Int, bits: Int):
   def apply(x: Arr)(using Scope): Arr = quantizedMatmul(x, w, scales, biases, transpose = true, groupSize, bits)
+  /** its input and output widths (the weights packed `32 / bits` to a 32-bit word) */
+  def inDim: Int = w.dim(1) * (32 / bits)
+  def outDim: Int = w.dim(0)
   /** rows of the weights, dequantized: an embedding's lookup */
   def rows(ids: Arr)(using Scope): Arr =
     dequantize(take(w, ids, 0), take(scales, ids, 0), take(biases, ids, 0), groupSize, bits)
@@ -125,6 +128,29 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   /** after each layer, the residual stream [1, n, hidden] to a hook: read (a direction measured) or changed (steered);
    * none by default */
   var hook: Qwen3.Hook | Null = null
+  /** LoRA adapters: `"<layer>.<proj>"` (proj q, k, v, o, gate, up, down) → (A [in, r], B [r, out]); a projection
+   * with one gives `W x + scale · (x A) B`. Set by training (the adapters its inputs), or loaded */
+  var lora: Map[String, (Arr, Arr)] = Map.empty
+  var loraScale: Float = 1f
+  private def adapted(i: Int, proj: String, base: QLinear, x: Arr)(using Scope): Arr =
+    lora.get(s"$i.$proj") match
+      case None => base(x)
+      case Some((a, b)) =>
+        val t = x.dtype
+        add(base(x), multiply(matmul(matmul(x, astype(a, t)), astype(b, t)), astype(scalar(loraScale), t)))
+  /** a projection's input and output widths: what an adapter on it is shaped by */
+  def widths(i: Int, proj: String): (Int, Int) =
+    val l = blocks(i)
+    val p = proj match
+      case "q" => l.q
+      case "k" => l.k
+      case "v" => l.v
+      case "o" => l.o
+      case "gate" => l.gate
+      case "up" => l.up
+      case "down" => l.down
+      case other => sys.error(s"no projection $other")
+    (p.inDim, p.outDim)
   private val embed = lin("model.embed_tokens")
   private val norm = w("model.norm.weight")
   private val scale = (1.0 / math.sqrt(headDim)).toFloat
@@ -154,16 +180,18 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr =
     logits(ids, state.asInstanceOf[State].caches, all = true)
 
-  private def attention(l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =
+  private def attention(i: Int, l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =
     val offset = cache.offset
     def split(t: Arr, count: Int) = transpose(reshape(t, 1, n, count, headDim), 0, 2, 1, 3)
-    val q = rope(transpose(rmsNorm(reshape(l.q(x), 1, n, config.heads, headDim), l.qNorm, eps), 0, 2, 1, 3),
+    val qx = adapted(i, "q", l.q, x)
+    val kx = adapted(i, "k", l.k, x)
+    val q = rope(transpose(rmsNorm(reshape(qx, 1, n, config.heads, headDim), l.qNorm, eps), 0, 2, 1, 3),
       headDim, false, ropeTheta, 1f, offset)
-    val k = rope(transpose(rmsNorm(reshape(l.k(x), 1, n, kvHeads, headDim), l.kNorm, eps), 0, 2, 1, 3),
+    val k = rope(transpose(rmsNorm(reshape(kx, 1, n, kvHeads, headDim), l.kNorm, eps), 0, 2, 1, 3),
       headDim, false, ropeTheta, 1f, offset)
-    val (keys, values) = cache.update(k, split(l.v(x), kvHeads))
+    val (keys, values) = cache.update(k, split(adapted(i, "v", l.v, x), kvHeads))
     val a = Mlx.attention(q, keys, values, scale, causal = n > 1)
-    l.o(reshape(transpose(a, 0, 2, 1, 3), 1, n, config.heads * headDim))
+    adapted(i, "o", l.o, reshape(transpose(a, 0, 2, 1, 3), 1, n, config.heads * headDim))
 
   /** the next token's logits after `ids` [1, n], the cache moved on by n: the last position's alone.
    *
@@ -177,9 +205,10 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       val l = blocks(i)
       val x = h
       h = Scope(s) {
-        val a = add(x, attention(l, rmsNorm(x, l.inNorm, eps), n, cache(i)))
+        val a = add(x, attention(i, l, rmsNorm(x, l.inNorm, eps), n, cache(i)))
         val m = rmsNorm(a, l.postNorm, eps)
-        val out = add(a, l.down(multiply(silu(l.gate(m)), l.up(m))))
+        val out = add(a, adapted(i, "down", l.down,
+          multiply(silu(adapted(i, "gate", l.gate, m)), adapted(i, "up", l.up, m))))
         if hook == null then out else hook.nn.after(i, out)
       }
       s.release(x)

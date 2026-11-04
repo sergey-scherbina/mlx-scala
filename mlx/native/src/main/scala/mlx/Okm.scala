@@ -57,6 +57,9 @@ private object C:
   def okm_floor_divide(a: Long, b: Long): Long = extern
   def okm_exp(a: Long): Long = extern
   def okm_negative(a: Long): Long = extern
+  def okm_log(a: Long): Long = extern
+  def okm_sqrt(a: Long): Long = extern
+  def okm_logsumexp(a: Long, axis: CInt, keepdims: CInt): Long = extern
   def okm_logaddexp(a: Long, b: Long): Long = extern
   def okm_contiguous(a: Long): Long = extern
   def okm_sum(a: Long, axis: CInt, keepdims: CInt): Long = extern
@@ -145,7 +148,9 @@ private[mlx] object Okm:
         else
           for k <- out.indices do outs(k) = out(k)
           out.length
-      catch case _: Throwable => -1
+      catch case e: Throwable =>
+        System.err.println(s"mlx autograd: the function threw $e")
+        -1
   }
   def valueAndGrad(id: Long, ins: Array[Long], argnums: Array[Int]): (Long, Array[Long]) | Null = Zone.acquire {
     implicit z =>
@@ -204,6 +209,9 @@ private[mlx] object Okm:
   def floorDivide(a: Long, b: Long): Long = C.okm_floor_divide(a, b)
   def exp(a: Long): Long = C.okm_exp(a)
   def negative(a: Long): Long = C.okm_negative(a)
+  def log(a: Long): Long = C.okm_log(a)
+  def sqrt(a: Long): Long = C.okm_sqrt(a)
+  def logsumexp(a: Long, axis: Int, keepdims: Boolean): Long = C.okm_logsumexp(a, axis, if keepdims then 1 else 0)
   def logaddexp(a: Long, b: Long): Long = C.okm_logaddexp(a, b)
   def contiguous(a: Long): Long = C.okm_contiguous(a)
   def sum(a: Long, axis: Int, keepdims: Boolean): Long = C.okm_sum(a, axis, if keepdims then 1 else 0)

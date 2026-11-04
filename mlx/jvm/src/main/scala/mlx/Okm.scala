@@ -79,6 +79,9 @@ private[mlx] object Okm:
   private val hFloorDivide = fn("okm_floor_divide", J, J, J)
   private val hExp = fn("okm_exp", J, J)
   private val hNegative = fn("okm_negative", J, J)
+  private val hLog = fn("okm_log", J, J)
+  private val hSqrt = fn("okm_sqrt", J, J)
+  private val hLogsumexp = fn("okm_logsumexp", J, J, I, I)
   private val hLogaddexp = fn("okm_logaddexp", J, J, J)
   private val hContiguous = fn("okm_contiguous", J, J)
   private val hSum = fn("okm_sum", J, J, I, I)
@@ -190,7 +193,9 @@ private[mlx] object Okm:
           val o = outs.reinterpret(8L * maxout)
           for k <- out.indices do o.setAtIndex(JAVA_LONG, k.toLong, out(k))
           out.length
-      catch case _: Throwable => -1
+      catch case e: Throwable =>
+        System.err.println(s"mlx autograd: the function threw $e")
+        -1
   private lazy val callbackStub: MemorySegment =
     val mt = java.lang.invoke.MethodType.methodType(classOf[Int], classOf[Long], classOf[MemorySegment], classOf[Int],
       classOf[MemorySegment], classOf[Int])
@@ -243,6 +248,10 @@ private[mlx] object Okm:
   def floorDivide(a: Long, b: Long): Long = hFloorDivide.invokeExact(a, b)
   def exp(a: Long): Long = hExp.invokeExact(a)
   def negative(a: Long): Long = hNegative.invokeExact(a)
+  def log(a: Long): Long = hLog.invokeExact(a)
+  def sqrt(a: Long): Long = hSqrt.invokeExact(a)
+  def logsumexp(a: Long, axis: Int, keepdims: Boolean): Long =
+    hLogsumexp.invokeExact(a, axis, if keepdims then 1 else 0)
   def logaddexp(a: Long, b: Long): Long = hLogaddexp.invokeExact(a, b)
   def contiguous(a: Long): Long = hContiguous.invokeExact(a)
   def sum(a: Long, axis: Int, keepdims: Boolean): Long = hSum.invokeExact(a, axis, if keepdims then 1 else 0)

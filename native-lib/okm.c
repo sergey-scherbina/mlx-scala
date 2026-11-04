@@ -128,6 +128,9 @@ void* okm_divide(void* a, void* b) { RET(mlx_divide(&r, A(a), A(b), S)); }
 void* okm_floor_divide(void* a, void* b) { RET(mlx_floor_divide(&r, A(a), A(b), S)); }
 void* okm_exp(void* a) { RET(mlx_exp(&r, A(a), S)); }
 void* okm_negative(void* a) { RET(mlx_negative(&r, A(a), S)); }
+void* okm_log(void* a) { RET(mlx_log(&r, A(a), S)); }
+void* okm_sqrt(void* a) { RET(mlx_sqrt(&r, A(a), S)); }
+void* okm_logsumexp(void* a, int axis, int keepdims) { RET(mlx_logsumexp_axis(&r, A(a), axis, keepdims != 0, S)); }
 void* okm_logaddexp(void* a, void* b) { RET(mlx_logaddexp(&r, A(a), A(b), S)); }
 void* okm_contiguous(void* a) { RET(mlx_contiguous(&r, A(a), false, S)); }
 void* okm_sum(void* a, int axis, int keepdims) { RET(mlx_sum_axis(&r, A(a), axis, keepdims, S)); }
@@ -434,11 +437,13 @@ typedef struct { okm_fn fn; long id; } okm_payload;
 static int okm_tramp(mlx_vector_array* res, const mlx_vector_array in, void* payload) {
   okm_payload* p = (okm_payload*)payload;
   int n = (int)mlx_vector_array_size(in);
-  if (n > 64) { snprintf(err, sizeof err, "okm_value_and_grad: more than 64 inputs"); return 1; }
-  void* ins[64]; void* outs[64]; mlx_array got[64];
+  void** ins = malloc(sizeof(void*) * (n + 1));
+  mlx_array* got = malloc(sizeof(mlx_array) * (n + 1));
+  void* outs[16];
   for (int i = 0; i < n; i++) { got[i] = mlx_array_new(); mlx_vector_array_get(&got[i], in, i); ins[i] = got[i].ctx; }
-  int m = p->fn(p->id, ins, n, outs, 64);
+  int m = p->fn(p->id, ins, n, outs, 16);
   for (int i = 0; i < n; i++) mlx_array_free(got[i]);
+  free(ins); free(got);
   if (m < 0) { snprintf(err, sizeof err, "okm_value_and_grad: the function failed"); return 1; }
   mlx_vector_array r = mlx_vector_array_new();
   for (int i = 0; i < m; i++) { mlx_vector_array_append_value(r, A(outs[i])); mlx_array_free(A(outs[i])); }

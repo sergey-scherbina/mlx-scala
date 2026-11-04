@@ -135,6 +135,10 @@ object Mlx:
   def divide(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.divide(a.h, b.h))
   def floorDivide(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.floorDivide(a.h, b.h))
   def exp(a: Arr)(using s: Scope): Arr = s.own(Okm.exp(a.h))
+  def log(a: Arr)(using s: Scope): Arr = s.own(Okm.log(a.h))
+  def sqrt(a: Arr)(using s: Scope): Arr = s.own(Okm.sqrt(a.h))
+  def logsumexp(a: Arr, axis: Int, keepdims: Boolean = false)(using s: Scope): Arr =
+    s.own(Okm.logsumexp(a.h, axis, keepdims))
   def negative(a: Arr)(using s: Scope): Arr = s.own(Okm.negative(a.h))
   def logaddexp(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.logaddexp(a.h, b.h))
   /** log(1 + eˣ) */
