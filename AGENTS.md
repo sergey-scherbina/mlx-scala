@@ -24,6 +24,14 @@ Apple's MLX from Scala 3 on two platforms, one model code: the JVM through FFM (
   longest kept prefix of the prompt. Snapshots only at marks: a linear layer's state is not cut back. `PrefixStore`:
   the first mark's snapshot written as safetensors (tokens in the metadata; the index is the headers), 4 GB budget —
   NOT every turn's (a 60k conversation wrote 31 GB in one run).
+  Also kept (memory only): the state after an answer (its stop token fed, fed now if a pass did not) and just after an
+  anchor token (`Chat.anchors`: `<tool_call>`) — the next turn of an agent begins there.
+- MTP (`Mtp`, `Session(drafts = k)`): Qwen3.5/3.6's own draft layer. mlx-community leaves `mtp.*` out; `mtpFetch`
+  (JVM test main, `llm/.jvm`) reads them from the original checkpoint by byte ranges, quantizes them as the model
+  (ALL norms +1, also `pre_fc_norm_*`: zero-centred), writes ~/.cache/mlx-scala/mtp/<models--org--name>/
+  mtp.safetensors; `Qwen35.load` reads it when there. A round: drafts from the layer (argmax), one pass checks them
+  (`hiddenStates` + `head`), the state rewound as for guesses. Greedy's tokens but for bf16 near ties. 35B-A3B k=2:
+  93 → 121 tok/s (`draftBench`, alternated medians); `mtpProbe` (teacher-forced: 70%), `draftProbe` (costs).
 - `Sampling` (greedy / temperature, top_k by argpartition, top_p by cumsum, categorical, seed); `Sampling.of(dir)`
   reads generation_config.json. Decode: `Session.next` builds and starts the next step BEFORE reading the current
   token (else no overlap: 13%); okm.c compiles mlx_lm's compiled functions (silu, swiglu, precise_swiglu,

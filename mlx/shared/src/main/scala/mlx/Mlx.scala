@@ -181,6 +181,11 @@ object Mlx:
     using s: Scope): Arr = s.own(Okm.quantizedMatmul(x.h, w.h, scales.h, biases.h, transpose, groupSize, bits))
   def dequantize(w: Arr, scales: Arr, biases: Arr, groupSize: Int, bits: Int)(using s: Scope): Arr =
     s.own(Okm.dequantize(w.h, scales.h, biases.h, groupSize, bits))
+  /** `w` [.., D] quantized along its last axis (affine): its packed weights, scales and biases */
+  def quantize(w: Arr, groupSize: Int, bits: Int)(using s: Scope): (Arr, Arr, Arr) =
+    val hs = Okm.quantize(w.h, groupSize, bits)
+    if hs.isEmpty then throw MlxError(Okm.error())
+    (s.own(hs(0)), s.own(hs(1)), s.own(hs(2)))
 
   // MLX's fused kernels
   /** `weight` may be `none` */

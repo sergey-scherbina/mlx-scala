@@ -99,6 +99,7 @@ private[mlx] object Okm:
   private val hKernelNew = fn("okm_kernel_new", J, J, J, I, J, I, J, J)
   private val hKernelApply = fn("okm_kernel_apply", I, J, J, I, J, J, J, I, J, J, J, J, J, I, J)
   private val hDequantize = fn("okm_dequantize", J, J, J, J, I, I)
+  private val hQuantize = fn("okm_quantize", I, J, I, I, J)
   private val hRmsNorm = fn("okm_rms_norm", J, J, J, F)
   private val hRope = fn("okm_rope", J, J, I, I, F, F, I)
   private val hSdpa = fn("okm_sdpa", J, J, J, J, F, I)
@@ -240,6 +241,13 @@ private[mlx] object Okm:
       : Long = hQmm.invokeExact(x, w, scales, biases, if transpose then 1 else 0, groupSize, bits)
   def dequantize(w: Long, scales: Long, biases: Long, groupSize: Int, bits: Int): Long =
     hDequantize.invokeExact(w, scales, biases, groupSize, bits)
+  def quantize(w: Long, groupSize: Int, bits: Int): Array[Long] =
+    val arena = Arena.ofConfined()
+    try
+      val outs = arena.allocate(JAVA_LONG, 3L)
+      val e: Int = hQuantize.invokeExact(w, groupSize, bits, outs.address())
+      if e != 0 then Array.empty else Array.tabulate(3)(i => outs.getAtIndex(JAVA_LONG, i.toLong))
+    finally arena.close()
   def rmsNorm(x: Long, w: Long, eps: Float): Long = hRmsNorm.invokeExact(x, w, eps)
   def rope(x: Long, dims: Int, traditional: Boolean, base: Float, scale: Float, offset: Int): Long =
     hRope.invokeExact(x, dims, if traditional then 1 else 0, base, scale, offset)

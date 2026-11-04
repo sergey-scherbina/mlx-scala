@@ -20,12 +20,19 @@ final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, deco
  * agree, its pick after them too. A pass a token or several; the tokens greedy's (but for a near tie the pass of
  * several computes apart) — or, drawn, a draw at each place (`Sampling.picks`): the draws' distribution unchanged.
  * Wrong guesses undone: the state back to before the pass, the tokens taken fed again where it cannot go back to
- * between (a recurrent state) */
+ * between (a recurrent state).
+ *
+ * KEPT FOR THE NEXT TURN (a `cache`): besides the prompt's marks, the state after the answer (its stop token fed:
+ * the next turn's prompt begins with the conversation so far and this answer) and the state just after an anchor
+ * token was fed (`anchors`, `Chat.anchors`: a tool call's opener — a client writes the call back its own way, the
+ * next prompt parts right after it). A linear layer's state cannot be cut back: those are the places it is kept */
 final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean,
     cache: PrefixCache | Null = null, marks: Seq[Int] = Nil, sampling: Sampling = Sampling.Greedy,
-    guesses: Int = 0, port: Port | Null = null):
+    guesses: Int = 0, port: Port | Null = null, anchors: Set[Int] = Set.empty, drafts: Int = 0):
   private var state: Model.State | Null = null
   private var cached = 0
+  // the tokens made that the state was fed, in order (the prompt's before them)
+  private val fed = scala.collection.mutable.ArrayBuffer.empty[Int]
   private val carry = new Scope
   private val t0 = System.nanoTime()
   private var firstAt = 0L
@@ -37,8 +44,18 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   // with penalties: how often each token was made, and the token ids to count them by — both on the GPU
   private var counts: Arr | Null = null
   private var ids: Arr | Null = null
+  private var started = false
+  // DRAFTS of the model's own (`drafts` > 0 and a draft layer: multi-token prediction): its state, and the pairs it
+  // is yet to be fed — the hidden states that chose tokens, and those tokens; the last of them the next token chosen
+  // (`last`), not yet fed to the model
+  private val draftState: Model.Draft | Null =
+    if drafts > 0 && !sampling.penalizes && port == null then model.newDraft() else null
+  private val drafting = draftState != null
+  private var pendingH: Arr | Null = null
+  private var pendingT: Arr | Null = null
+  private var last = 0
   // guesses checked: the text so far, the tokens made and not yet given
-  private val checking = guesses > 0 && !sampling.penalizes && port == null
+  private val checking = guesses > 0 && !sampling.penalizes && port == null && !drafting
   private val text = scala.collection.mutable.ArrayBuffer.from(prompt)
   private val ready = scala.collection.mutable.Queue.empty[Int]
   private var guessing = guesses
@@ -103,7 +120,8 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     if finished then None
     else if ready.nonEmpty then give(ready.dequeue())
     else
-      if y == null then
+      if !started then
+        started = true
         sampling.seed.foreach(Mlx.randomSeed)
         // from the longest prefix a cache keeps, if any; then the prompt but its last token in chunks, the state
         // evaluated after each (memory bounded), a snapshot kept at each mark; the last token the first step — as
@@ -116,13 +134,32 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         while prompt.length - at > 1 do
           val next = points.find(_ > at).getOrElse(Int.MaxValue)
           val m = math.min(math.min(Session.chunk, prompt.length - at - 1), next - at)
-          Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
+          if !drafting then Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
+          else Scope(carry) {
+            // the draft layer fed too: each position's hidden state and the token after it
+            val h = model.hiddenStates(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn, all = true)
+            model.draft(h, Mlx.ints(prompt.slice(at + 1, at + m + 1), 1, m), draftState.nn).eval()
+          }
           at += m
           if at == next && cache != null then
             cache.nn.add(prompt.take(at), state.nn.snapshot(), durable = marks.headOption.contains(at))
         val input = Scope(carry)(Mlx.ints(prompt.drop(at), 1, prompt.length - at))
-        y = step(input)
+        if !drafting then y = step(input)
+        else
+          pendingH = Scope(carry)(model.hiddenStates(input, state.nn, all = false))
+          y = Scope(carry)(sampling.pick(model.head(pendingH.nn)))
         carry.release(input)
+      if drafting then
+        if made == 0 then
+          // the first token: the prompt's pick, its hidden state pending
+          last = y.nn.itemInt
+          carry.release(y.nn)
+          y = null
+          pendingT = ints(Array(last), 1, 1)(using carry)
+          ready += last
+        else drafted()
+        if made == 0 then firstAt = System.nanoTime()
+        return give(ready.dequeue())
       val current = y.nn
       // a guess likely only if the last two tokens given were seen before: then the chosen one read now (no step
       // started ahead), the guesses looked up after it and checked; else a step ahead, as without guesses
@@ -133,7 +170,9 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         text += token
         val guess = lookup(guessing)
         if guess.nonEmpty then checked(token, guess)
-        else y = step(Scope(carry)(ints(Array(token), 1, 1)))
+        else
+          y = step(Scope(carry)(ints(Array(token), 1, 1)))
+          fedMore(Array(token))
       else if port != null then
         // a port: the token read first, told to it, then the next step built under its mask (no overlap)
         val token = current.itemInt
@@ -146,8 +185,9 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
           b.foreach(port.nn.took)
           ready ++= b
         }
-        val fed = token +: chosen.getOrElse(Array.empty[Int])
-        y = if made + fed.length < maxTokens then step(Scope(carry)(ints(fed, 1, fed.length))) else null
+        val more = token +: chosen.getOrElse(Array.empty[Int])
+        y = if made + more.length < maxTokens then step(Scope(carry)(ints(more, 1, more.length))) else null
+        if y != null then fedMore(more)
       else
         // the next step built and started BEFORE this one is read — as mlx_lm: the graph's building and encoding
         // overlap the GPU's running this one (read first, they did not: 13% of the decode's speed)
@@ -156,11 +196,21 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         y = next
         carry.release(current)
         ready += token
+        if next != null then fedMore(Array(token))
         if checking then
           text += token
           if resting > 0 then resting -= 1
       if made == 0 then firstAt = System.nanoTime()
       give(ready.dequeue())
+
+  /** tokens made fed to the state: kept (`cache`) when one of them is an anchor */
+  private def fedMore(tokens: Array[Int]): Unit =
+    fed ++= tokens
+    if cache != null && tokens.exists(anchors) then keepNow()
+
+  /** the state as it is now kept, for the prompt and the tokens fed */
+  private def keepNow(): Unit =
+    cache.nn.add(prompt ++ fed, state.nn.snapshot())
 
   /** a token given: the end at a stop token or `maxTokens` */
   private def give(token: Int): Option[Int] =
@@ -169,9 +219,71 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
       endAt = System.nanoTime()
       finished = true
       stopped = stops(token)
+      // the answer's state kept when the stop token is the last fed: its step run to the end first (its state then
+      // computed, not a graph holding the one before)
+      // (fed as far as given, the stop token too); else the stop token fed now when all before it were and no more
+      if stopped && cache != null then
+        if fed.length == made && fed.last == token then
+          if y != null then y.nn.eval()
+          keepNow()
+        else if fed.length == made - 1 then
+          Scope(carry)(model.logits(ints(Array(token), 1, 1), state.nn).eval())
+          fed += token
+          keepNow()
       close()
       if stopped then None else Some(token)
     else Some(token)
+
+  /** A ROUND OF DRAFTS (multi-token prediction): the draft layer fed the pairs pending, its last guessing the token
+   * after `last`, then `drafts` − 1 more from its own hidden states — all on the GPU, no wait; then one pass of the
+   * model over `last` and the drafts, the model's pick at each place, the drafts taken while they agree and its pick
+   * after them the next chosen (one wait). The draft layer's guesses past the pairs dropped (its offset set back),
+   * the model's state back to after the last taken — and the pairs it now owes the draft layer: each hidden state of
+   * the pass up to that one, with the token after it */
+  private def drafted(): Unit =
+    val st = state.nn
+    val d = draftState.nn
+    val m = pendingT.nn.dim(1)
+    var kept = 0
+    val input = Scope(carry) {
+      var o = model.draft(pendingH.nn, pendingT.nn, d)
+      if m > 1 then o = slice(o, Seq(0, m - 1, 0), Seq(1, m, o.dim(2)))
+      kept = d.offset
+      def guess(h: Arr) = astype(reshape(argmax(model.head(h), -1), 1, 1), Dtype.Int32)
+      val ts = scala.collection.mutable.ArrayBuffer(ints(Array(last), 1, 1), guess(o))
+      while ts.length <= drafts do
+        o = model.draft(o, ts.last, d)
+        ts += guess(o)
+      concatenate(ts.toSeq, 1)
+    }
+    // the drafts started on the GPU while the pass checking them is built
+    input.evalAsync()
+    d.offset = kept
+    carry.release(pendingH.nn)
+    carry.release(pendingT.nn)
+    val at = st.checkpoint()
+    val h = Scope(carry)(model.hiddenStates(input, st, all = true))
+    val p = Scope(carry)(sampling.picks(model.head(h)))
+    val Seq(in, picks) = Scope(carry)(readInts(Seq(input, p))): @unchecked
+    carry.release(input)
+    carry.release(p)
+    var a = 0
+    while a < drafts && in(a + 1) == picks(a) do a += 1
+    if a < drafts && !st.rewind(at, a + 1) then
+      Scope(carry)(model.logits(ints(in.take(a + 1), 1, a + 1), st).eval())
+    at.close()
+    passes += 1
+    guessed += drafts
+    taken += a
+    fedMore(in.take(a + 1))
+    last = picks(a)
+    val chosen = in.slice(1, a + 1) :+ last
+    ready ++= chosen
+    pendingH = if a == drafts then h else
+      val r = Scope(carry)(slice(h, Seq(0, 0, 0), Seq(1, a + 1, h.dim(2))))
+      carry.release(h)
+      r
+    pendingT = ints(chosen, 1, a + 1)(using carry)
 
   /** a pass checking guesses: `token` the last chosen (read, not fed), `guess` what the text says follows it. One
    * pass over `token` and the guesses; they are taken while the model's picks agree, its pick after them the next
@@ -197,6 +309,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
       resting = 1 << misses
     else misses = 0
     y = ints(Array(picks(a)), 1, 1)(using carry)
+    fedMore(token +: guess.take(a))
     val out = guess.take(a)
     ready ++= out
     text ++= out
@@ -234,6 +347,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     finished = true
     carry.close()
     if state != null then state.nn.close()
+    if draftState != null then draftState.nn.close()
 
 object Session:
   /** a prompt's tokens a pass */

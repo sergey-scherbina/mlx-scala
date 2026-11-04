@@ -43,6 +43,7 @@ private object C:
   def okm_quantized_matmul(x: Long, w: Long, s: Long, b: Long, transpose: CInt, gs: CInt, bits: CInt): Long =
     extern
   def okm_dequantize(w: Long, s: Long, b: Long, gs: CInt, bits: CInt): Long = extern
+  def okm_quantize(w: Long, gs: CInt, bits: CInt, outs: Ptr[Long]): CInt = extern
   def okm_subtract(a: Long, b: Long): Long = extern
   def okm_silu(a: Long): Long = extern
   def okm_cumsum(a: Long, axis: CInt): Long = extern
@@ -192,6 +193,10 @@ private[mlx] object Okm:
       : Long = C.okm_quantized_matmul(x, w, scales, biases, if transpose then 1 else 0, groupSize, bits)
   def dequantize(w: Long, scales: Long, biases: Long, groupSize: Int, bits: Int): Long =
     C.okm_dequantize(w, scales, biases, groupSize, bits)
+  def quantize(w: Long, groupSize: Int, bits: Int): Array[Long] = Zone.acquire { implicit z =>
+    val outs = alloc[Long](3)
+    if C.okm_quantize(w, groupSize, bits, outs) != 0 then Array.empty else Array.tabulate(3)(i => outs(i))
+  }
   def rmsNorm(x: Long, w: Long, eps: Float): Long = C.okm_rms_norm(x, w, eps)
   def rope(x: Long, dims: Int, traditional: Boolean, base: Float, scale: Float, offset: Int): Long =
     C.okm_rope(x, dims, if traditional then 1 else 0, base, scale, offset)

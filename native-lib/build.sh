@@ -13,5 +13,7 @@ cmake --install build >> build.log
 ls out/lib
 # okm: the flat layer over mlx-c both platforms call
 clang -O2 -dynamiclib okm.c -I out/include -L out/lib -lmlxc -Wl,-rpath,@loader_path \
-  -install_name @rpath/libokm.dylib -o out/lib/libokm.dylib
+  -install_name @rpath/libokm.dylib -o out/lib/libokm.dylib.new
+# renamed into place: a process running on the old one keeps it
+mv -f out/lib/libokm.dylib.new out/lib/libokm.dylib
 ls out/lib/libokm.dylib

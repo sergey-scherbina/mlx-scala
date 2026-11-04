@@ -167,6 +167,17 @@ void* okm_dequantize(void* w, void* scales, void* biases, int group_size, int bi
     (mlx_optional_dtype){.has_value = false}, S));
 }
 
+// quantized: w [.., D] → (weights, scales, biases) into outs[0..2], affine, along the last axis
+int okm_quantize(void* w, int group_size, int bits, void** outs) {
+  mlx_vector_array res = mlx_vector_array_new();
+  int e = mlx_quantize(&res, A(w), oi(group_size), oi(bits), "affine", (mlx_array){0}, S);
+  if (!e) for (int i = 0; i < 3; i++) {
+    mlx_array a = mlx_array_new(); mlx_vector_array_get(&a, res, i); outs[i] = a.ctx;
+  }
+  mlx_vector_array_free(res);
+  return e;
+}
+
 // rows of quantized experts by index: x [.., 1, D] · w[idx]ᵀ
 void* okm_gather_qmm(void* x, void* w, void* scales, void* biases, void* rhs, int transpose, int group_size, int bits,
     int sorted) {

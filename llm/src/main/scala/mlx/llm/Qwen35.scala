@@ -155,9 +155,10 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
         val y = glu(rows, take(flat, order, 0), sorted = true)
         squeeze(reshape(take(y, inverse, 0), 1, n, k, 1, y.dim(-1)), -2)
 
-  private final class Layer(val i: Int):
-    private val p = s"${P}layers.$i"
-    val linear: Boolean = (i + 1) % interval != 0
+  /** a decoder layer: the i-th, or the draft layer (`full`: full attention, after the last: `i` = layers) */
+  private final class Layer(val i: Int, prefix: String = "", full: Boolean = false):
+    private val p = if prefix.isEmpty then s"${P}layers.$i" else prefix
+    val linear: Boolean = !full && (i + 1) % interval != 0
     val inNorm: Arr = w(s"$p.input_layernorm.weight")
     val postNorm: Arr = w(s"$p.post_attention_layernorm.weight")
     // full attention
@@ -213,7 +214,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       case _ => null
     if p == null then None else Some((p.nn.inDim, p.nn.outDim))
   private val embed = lin(s"${P}embed_tokens")
-  private val head = if weights.contains("language_model.lm_head.weight") then lin("language_model.lm_head") else embed
+  private val lmHead =
+    if weights.contains("language_model.lm_head.weight") then lin("language_model.lm_head") else embed
   private val norm = w(s"${P}norm.weight")
   private val keyDim = linearKeyHeads * linearKeyDim
   private val valueDim = linearValueHeads * linearValueDim
@@ -396,8 +398,39 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
   /** each layer in a scope of its own, its output alone moved out (a handle held keeps its buffer) */
   def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state, all = true)
   def logits(ids: Arr, state: Model.State)(using Scope): Arr = logits(ids, state, all = false)
+  override def head(h: Arr)(using Scope): Arr = lmHead(h)
 
   private def logits(ids: Arr, state: Model.State, all: Boolean)(using s: Scope): Arr =
+    val h = hiddenStates(ids, state, all)
+    val r = Scope(s)(lmHead(h))
+    s.release(h)
+    r
+
+  // THE DRAFT LAYER (multi-token prediction), when its weights were found (`Mtp`): the token after the next guessed
+  // from the hidden state that chose the next and the next's embedding, a full attention layer of its own
+  private val mtpLayer: Layer | Null = if weights.contains("mtp.fc.weight") then Layer(layers, "mtp.layers.0", true)
+    else null
+  private lazy val mtpFc = lin("mtp.fc")
+  private lazy val mtpEmbedNorm = w("mtp.pre_fc_norm_embedding.weight")
+  private lazy val mtpHiddenNorm = w("mtp.pre_fc_norm_hidden.weight")
+  private lazy val mtpNorm = w("mtp.norm.weight")
+  override def newDraft(): Model.Draft | Null = if mtpLayer == null then null else KvCache(kvHeads, headDim)
+  override def draft(h: Arr, ids: Arr, d: Model.Draft)(using s: Scope): Arr =
+    val l = mtpLayer.nn
+    val n = ids.dim(1)
+    val x = Scope(s) {
+      val e = rmsNorm(reshape(embed.rows(reshape(ids, n)), 1, n, hidden), mtpEmbedNorm, eps)
+      val hh = rmsNorm(h, mtpHiddenNorm, eps)
+      mtpFc(concatenate(Seq(e, hh), -1)) // the embedding first, as the checkpoint was trained
+    }
+    val y = Scope(s) {
+      val a = add(x, attention(l, rmsNorm(x, l.inNorm, eps), n, d.asInstanceOf[KvCache]))
+      rmsNorm(add(a, mlp(l, rmsNorm(a, l.postNorm, eps), n)), mtpNorm, eps)
+    }
+    s.release(x)
+    y
+
+  override def hiddenStates(ids: Arr, state: Model.State, all: Boolean)(using s: Scope): Arr =
     val caches = state.asInstanceOf[State].caches
     val n = ids.dim(1)
     var h = Scope(s)(reshape(embed.rows(reshape(ids, n)), 1, n, hidden))
@@ -417,7 +450,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       i += 1
     Scope(s) {
       val last = if n == 1 || all then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
-      head(rmsNorm(last, norm, eps))
+      rmsNorm(last, norm, eps)
     }
 
   /** the hidden state's sum and sum of squares at the last position after each of the first `count` layers: a
@@ -623,23 +656,28 @@ object Qwen35:
 """ + marker))
 
   /** the model in a directory: config.json and its shards — the language model's weights alone (not the vision
-   * tower's, nor the multi-token predictor's) */
+   * tower's; the multi-token predictor's from its pack, `Mtp`, when there is one) */
   /** `expertSlots` > 0, fewer than its experts: a mixture of experts' hot ones alone in memory, that many a layer
    * (`ExpertCache`), the rest read from the files as picked */
   def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
-      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0): Qwen35 =
+      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0, mtp: Boolean = true): Qwen35 =
     Mlx.init()
-    val config = Qwen35Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
+    val base = Qwen35Config(Json.fromText(Files.readString(dir.resolve("config.json"))))
     val own = new Scope
     given Scope = own
-    val hot = expertSlots > 0 && config.experts > expertSlots
+    val hot = expertSlots > 0 && base.experts > expertSlots
     require(!hot || mapped, "hot experts need the weights mapped")
     // the experts mapped cold: their pages read only as a prompt's pass uses them
     val expertTensor = (k: String) => hot && k.contains(".mlp.switch_mlp.")
     val shards = SafeTensors.shards(dir)
     val all = shards.flatMap(SafeTensors.load(_, mapped, inPlace, expertTensor)).toMap
-    val (keep, drop) = all.partition((k, _) => k.startsWith("language_model.") && !k.contains(".mtp."))
+    val (trunk, drop) = all.partition((k, _) => k.startsWith("language_model.") && !k.contains(".mtp."))
     drop.values.foreach(own.release)
+    // the draft layer's pack, when there is one (`Mtp`): read whole, its quantization as the model's layer 0
+    val pack = Mtp.path(dir)
+    val mtpWeights = if mtp && Files.exists(pack) then Mlx.loadSafetensors(pack.toString) else Map.empty[String, Arr]
+    val keep = trunk ++ mtpWeights
+    val config = base.copy(quantized = base.quantized ++ Mtp.overrides(mtpWeights.keys, base))
     evalAll(keep.values.toSeq)
     val caches =
       if !hot then Map.empty[String, ExpertCache]

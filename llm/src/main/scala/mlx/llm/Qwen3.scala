@@ -31,7 +31,7 @@ final class QLinear(w: Arr, scales: Arr, biases: Arr, groupSize: Int, bits: Int)
 
 /** A LAYER'S KV CACHE: keys and values of the positions so far, in buffers grown 256 positions at a time; the new
  * positions written in place (`slice_update`), the positions so far a view */
-final class KvCache(kvHeads: Int, headDim: Int):
+final class KvCache(kvHeads: Int, headDim: Int) extends Model.Draft:
   private val own = new Scope
   private var keys: Arr | Null = null
   private var values: Arr | Null = null

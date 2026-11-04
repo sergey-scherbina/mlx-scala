@@ -19,6 +19,10 @@ final class Chat(val tokenizer: Tokenizer, val template: ChatTemplate, val stops
     val at = prompt.indices.filter(i => prompt(i) == start)
     (at.lift(1).toSeq ++ at.lastOption.toSeq).filter(_ > 0).distinct
 
+  /** where to keep the state while answering (`Session`'s anchors): a tool call's opener, a token of its own — the
+   * client writes the call back its own way (its JSON reformatted), the next prompt parts right after it */
+  val anchors: Set[Int] = Set("<tool_call>").map(tokenizer.id).filter(_ >= 0)
+
   /** one user turn */
   def ask(question: String, extra: Map[String, Any] = Map.empty): Array[Int] =
     prompt(Seq(Json.obj("role" -> Json.Str("user"), "content" -> Json.Str(question))), Nil, extra)

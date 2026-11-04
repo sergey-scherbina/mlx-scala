@@ -28,7 +28,7 @@ class PrefixCacheSuite extends munit.FunSuite:
       val p1 = chat.prompt(turn1, Nil, off)
       val (a, ta) = run(p1, cache)
       assertEquals(ta.cachedTokens, 0)
-      assertEquals(cache.size, chat.marks(p1).size)
+      assertEquals(cache.size, chat.marks(p1).size + 1) // and the answer
       // the same prompt again: from the snapshot before its last message, the same answer
       val (b, tb) = run(p1, cache)
       assertEquals(b, a)
@@ -40,5 +40,25 @@ class PrefixCacheSuite extends munit.FunSuite:
       assert(tc.cachedTokens >= chat.marks(p1).head, s"${tc.cachedTokens} cached of ${p2.length}")
       println(s"$repo: ${chat.tokenizer.decode(a).trim} / ${chat.tokenizer.decode(c).trim} — " +
         s"cached ${tb.cachedTokens} of ${p1.length}, then ${tc.cachedTokens} of ${p2.length}; ${cache.bytes >> 20} MB")
+      cache.clear()
+
+      // the answer kept: a prompt beginning with the prompt and the answer (its stop token too) computed from the end
+      // of the answer, the same tokens as computing it all; an anchor's state kept where the anchor was fed
+      val (d, _) = run(p1, cache)
+      val stop = chat.stops.find(t => cache.lookup(p1 ++ d :+ t :+ 0).exists(_._1 == p1.length + d.length + 1))
+      assert(stop.isDefined, s"the answer's state not kept: ${cache.size} entries")
+      val p3 = p1 ++ d ++ stop.toSeq ++ chat.tokenizer.encode("\n<|im_start|>user\nAnd of Italy?<|im_end|>\n" +
+        "<|im_start|>assistant\n")
+      val (e, te) = run(p3, cache)
+      assertEquals(te.cachedTokens, p1.length + d.length + 1)
+      val (f, _) = run(p3, null)
+      assertEquals(e, f)
+      cache.clear()
+      val at = math.min(2, d.length - 1)
+      val anchor = d(at)
+      val s = Session(model, p1, 12, chat.stops, cache, Nil, anchors = Set(anchor))
+      Iterator.continually(s.next()).takeWhile(_.isDefined).foreach(_ => ())
+      s.close()
+      assert(cache.lookup(p1 ++ d.take(at + 1) :+ 0).exists(_._1 == p1.length + at + 1), "the anchor's state not kept")
       cache.clear()
       model.close()

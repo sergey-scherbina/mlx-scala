@@ -16,6 +16,17 @@ trait Model:
   def logits(ids: Arr, state: Model.State)(using Scope): Arr
   /** the logits after each of `ids` [1, n]: [1, n, V], the state moved on by n — n guesses checked in one pass */
   def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr
+  /** the hidden states after the last norm, of the last of `ids` [1, n] or of each: [1, 1 or n, H], the state moved
+   * on by n — the logits by `head`, a draft layer's input (`draft`) */
+  def hiddenStates(ids: Arr, state: Model.State, all: Boolean)(using Scope): Arr = sys.error("no hidden states")
+  /** the logits of hidden states [1, n, H]: [1, n, V] */
+  def head(h: Arr)(using Scope): Arr = sys.error("no hidden states")
+  /** a state for the model's draft layer (multi-token prediction: the next token's next guessed), or null: it has
+   * none */
+  def newDraft(): Model.Draft | Null = null
+  /** the draft layer on hidden states `h` [1, n, H] (`hiddenStates`', or its own) and the token after each [1, n]: its
+   * hidden states [1, n, H] — the logits of the token after those by `head` — the draft's state moved on by n */
+  def draft(h: Arr, ids: Arr, d: Model.Draft)(using Scope): Arr = sys.error("no draft layer")
   def close(): Unit
 
 object Model:
@@ -29,6 +40,11 @@ object Model:
     /** back to `c` with `keep` of the tokens fed since kept: true — or false when only `c` itself can be come back
      * to (a recurrent state keeps no position but its last), the caller to feed those `keep` again */
     def rewind(c: Checkpoint, keep: Int): Boolean
+  /** a draft layer's state: its positions so far, set back to drop the guesses past them */
+  trait Draft:
+    def offset: Int
+    def offset_=(at: Int): Unit
+    def close(): Unit
   /** a state's place, kept for a while */
   trait Checkpoint:
     def close(): Unit
@@ -49,8 +65,8 @@ object Model:
 
   /** the model of a directory, by its config.json's model_type; its weights read, or mapped (`SafeTensors`) */
   def load(dir: Path, mapped: Boolean = SafeTensors.mappedByDefault,
-      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0): Model =
+      inPlace: Boolean = SafeTensors.alignInPlace, expertSlots: Int = 0, mtp: Boolean = true): Model =
     modelType(dir).getOrElse(sys.error(s"no config.json in $dir")) match
       case "qwen3" => Qwen3.load(dir, mapped, inPlace)
-      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir, mapped, inPlace, expertSlots)
+      case "qwen3_5" | "qwen3_5_moe" => Qwen35.load(dir, mapped, inPlace, expertSlots, mtp)
       case other => sys.error(s"a model type not supported: $other")
