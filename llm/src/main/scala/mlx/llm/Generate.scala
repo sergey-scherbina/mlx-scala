@@ -23,7 +23,7 @@ final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, deco
  * between (a recurrent state) */
 final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean,
     cache: PrefixCache | Null = null, marks: Seq[Int] = Nil, sampling: Sampling = Sampling.Greedy,
-    guesses: Int = 0):
+    guesses: Int = 0, port: Port | Null = null):
   private var state: Model.State | Null = null
   private var cached = 0
   private val carry = new Scope
@@ -38,7 +38,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   private var counts: Arr | Null = null
   private var ids: Arr | Null = null
   // guesses checked: the text so far, the tokens made and not yet given
-  private val checking = guesses > 0 && !sampling.penalizes
+  private val checking = guesses > 0 && !sampling.penalizes && port == null
   private val text = scala.collection.mutable.ArrayBuffer.from(prompt)
   private val ready = scala.collection.mutable.Queue.empty[Int]
   private var guessing = guesses
@@ -51,7 +51,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   var passes = 0
 
   private def step(input: Arr): Arr = Scope(carry) {
-    val logits = model.logits(input, state.nn)
+    val logits = masked(model.logits(input, state.nn))
     if !sampling.penalizes then sampling.pick(logits).evalAsync()
     else
       val v = logits.dim(-1)
@@ -66,6 +66,17 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
       now.evalAsync()
       token
   }
+
+  /** the logits with what the port does not allow at −∞ (as they are without a port, or when it allows any) */
+  private def masked(logits: Arr)(using Scope): Arr =
+    if port == null then logits
+    else port.nn.allowed match
+      case None => logits
+      case Some(ok) =>
+        val v = logits.dim(-1)
+        val flags = new Array[Int](v)
+        ok.foreach(t => if t >= 0 && t < v then flags(t) = 1)
+        where(greater(ints(flags, 1, v), int(0)), logits, astype(scalar(Float.NegativeInfinity), logits.dtype))
 
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
   def next(): Option[Int] =
@@ -103,6 +114,13 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         val guess = lookup(guessing)
         if guess.nonEmpty then checked(token, guess)
         else y = step(Scope(carry)(ints(Array(token), 1, 1)))
+      else if port != null then
+        // a port: the token read first, told to it, then the next step built under its mask (no overlap)
+        val token = current.itemInt
+        carry.release(current)
+        port.nn.took(token)
+        ready += token
+        y = if made + 1 < maxTokens then step(Scope(carry)(ints(Array(token), 1, 1))) else null
       else
         // the next step built and started BEFORE this one is read — as mlx_lm: the graph's building and encoding
         // overlap the GPU's running this one (read first, they did not: 13% of the decode's speed)
