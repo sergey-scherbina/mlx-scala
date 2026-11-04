@@ -50,8 +50,10 @@ class NamesSuite extends munit.FunSuite:
   test("owners and members from SemanticDB symbols"):
     val m = Names.fromSymbols(Seq("symdex/Equivalence." -> "Equivalence", "symdex/Equivalence.target()." -> "target",
       "symdex/Equivalence.Target#" -> "Target", "symdex/Equivalence.Target#arity." -> "arity",
-      "symdex/Tools.equivalent()." -> "equivalent", "symdex/Exec.Run#" -> "Run"))
+      "symdex/Tools.equivalent()." -> "equivalent", "symdex/Exec.Run#" -> "Run", "symdex/Exec.answered().(p)" -> "p",
+      "symdex/Exec.answered(+1)." -> "answered"))
     assertEquals(m("Equivalence"), Set("target", "Target"))
     assertEquals(m("Target"), Set("arity"))
     assertEquals(m("symdex"), Set("Equivalence"))
     assertEquals(m("Tools"), Set("equivalent"))
+    assertEquals(m("Exec"), Set("Run", "answered"))

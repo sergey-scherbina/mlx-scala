@@ -69,8 +69,9 @@ object Names:
    * `pkg/Cls#m().` → Cls: m; `pkg/Obj.` → pkg's last segment: Obj
    */
   def fromSymbols(named: Seq[(String, String)]): Map[String, Set[String]] =
-    named.flatMap { (sym, name) =>
-      val body = sym.stripSuffix(".").stripSuffix("#").replaceAll("""\([^)]*\)$""", "")
+    // parameters (`m().(p)`), type parameters (`[T]`) and locals are not members
+    named.filterNot((s, _) => s.endsWith(")") || s.contains("[") || s.startsWith("local")).flatMap { (sym, name) =>
+      val body = sym.stripSuffix(".").stripSuffix("#").replaceAll("""\(\+?\d*\)$""", "")
       val cut = math.max(body.lastIndexOf('.'), math.max(body.lastIndexOf('#'), body.lastIndexOf('/')))
       if cut <= 0 || name.isEmpty || !name.head.isLetter && name.head != '_' then None
       else
