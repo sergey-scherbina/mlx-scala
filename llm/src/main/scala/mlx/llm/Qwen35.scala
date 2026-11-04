@@ -327,7 +327,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       else (if steps then Qwen35.deltaRuleSteps else Qwen35.deltaRule, (32, linearValueDim, linearValueHeads),
         (32, 4, 1))
     val stateShape = Seq(1, linearValueHeads, linearValueDim, linearKeyDim)
-    if differentiable then
+    // the first layer with an adapter: below it no gradient is wanted (the parameters are above), the kernel serves
+    if differentiable && l.i >= lora.keys.map(_.takeWhile(_ != '.').toInt).minOption.getOrElse(0) then
       // training: the delta rule step by step in ops, as mlx_lm's gated_delta_ops — the kernel has no gradient
       val (y, last) = deltaOps(q, k, v, g, beta, state, n)
       st.keep(keep, last)
