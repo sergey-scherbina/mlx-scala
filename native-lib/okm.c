@@ -425,3 +425,44 @@ long okm_memory_room(void) {
   if (page < 0 || f < 0 || sp < 0 || ext < 0) return -1;
   return ((long)f + sp + ext) * page;
 }
+
+// AUTOGRAD: a function of arrays given as a callback — `fn(id, ins, nin, outs, maxout)` gets its inputs' handles
+// (borrowed: freed here after), writes its outputs' handles (each one the callee's own new handle, given up: freed
+// here once taken) and returns how many, or -1 — and its value and gradients by `argnums`.
+typedef int (*okm_fn)(long id, void** ins, int nin, void** outs, int maxout);
+typedef struct { okm_fn fn; long id; } okm_payload;
+static int okm_tramp(mlx_vector_array* res, const mlx_vector_array in, void* payload) {
+  okm_payload* p = (okm_payload*)payload;
+  int n = (int)mlx_vector_array_size(in);
+  if (n > 64) { snprintf(err, sizeof err, "okm_value_and_grad: more than 64 inputs"); return 1; }
+  void* ins[64]; void* outs[64]; mlx_array got[64];
+  for (int i = 0; i < n; i++) { got[i] = mlx_array_new(); mlx_vector_array_get(&got[i], in, i); ins[i] = got[i].ctx; }
+  int m = p->fn(p->id, ins, n, outs, 64);
+  for (int i = 0; i < n; i++) mlx_array_free(got[i]);
+  if (m < 0) { snprintf(err, sizeof err, "okm_value_and_grad: the function failed"); return 1; }
+  mlx_vector_array r = mlx_vector_array_new();
+  for (int i = 0; i < m; i++) { mlx_vector_array_append_value(r, A(outs[i])); mlx_array_free(A(outs[i])); }
+  mlx_vector_array_set(res, r);
+  mlx_vector_array_free(r);
+  return 0;
+}
+// the value (the function's first output) into *value, the gradient by argnums[k] into grads[k]: 0, or not
+int okm_value_and_grad(okm_fn fn, long id, void** ins, int nin, const int* argnums, int nargs, void** value,
+                       void** grads) {
+  okm_payload p = {fn, id};
+  mlx_closure f = mlx_closure_new_func_payload(okm_tramp, &p, NULL);
+  mlx_closure_value_and_grad vg = mlx_closure_value_and_grad_new();
+  mlx_vector_array input = mlx_vector_array_new(), v = mlx_vector_array_new(), g = mlx_vector_array_new();
+  for (int i = 0; i < nin; i++) mlx_vector_array_append_value(input, A(ins[i]));
+  int rc = mlx_value_and_grad(&vg, f, argnums, (size_t)nargs);
+  if (!rc) rc = mlx_closure_value_and_grad_apply(&v, &g, vg, input);
+  if (!rc) {
+    mlx_array a = mlx_array_new();
+    mlx_vector_array_get(&a, v, 0);
+    *value = a.ctx;
+    for (int k = 0; k < nargs; k++) { mlx_array b = mlx_array_new(); mlx_vector_array_get(&b, g, k); grads[k] = b.ctx; }
+  }
+  mlx_vector_array_free(input); mlx_vector_array_free(v); mlx_vector_array_free(g);
+  mlx_closure_value_and_grad_free(vg); mlx_closure_free(f);
+  return rc;
+}

@@ -84,6 +84,24 @@ object Mlx:
 
   def ints(data: Array[Int], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromI32(data, shape.toArray))
   def floats(data: Array[Float], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromF32(data, shape.toArray))
+
+  /** AUTOGRAD: the value of `f` at `inputs` (its result, a scalar) and its gradients by the inputs at `argnums` —
+   * mlx_value_and_grad, `f` called back from it (its inputs borrowed, its intermediates freed when it returns) */
+  def valueAndGrad(inputs: Seq[Arr], argnums: Seq[Int])(f: Scope ?=> Seq[Arr] => Arr)(using s: Scope)
+      : (Arr, Seq[Arr]) =
+    val id = Grad.register { hs =>
+      val borrowed = new Scope // never closed: the handles are the caller's to free
+      val t = new Scope
+      try
+        val out = f(using t)(hs.toSeq.map(h => Arr(h, borrowed)))
+        Array(Okm.retain(out.h))
+      finally t.close()
+    }
+    try
+      val r = Okm.valueAndGrad(id, inputs.map(_.h).toArray, argnums.toArray)
+      if r == null then throw MlxError(Okm.error())
+      (s.own(r._1), r._2.toSeq.map(s.own))
+    finally Grad.forget(id)
   def scalar(v: Float)(using s: Scope): Arr = s.own(Okm.scalarF32(v))
   def zeros(shape: Seq[Int], dtype: Dtype)(using s: Scope): Arr = s.own(Okm.zeros(shape.toArray, dtype.ordinal))
 

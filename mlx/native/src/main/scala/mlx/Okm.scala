@@ -22,6 +22,8 @@ private object C:
   def okm_item_f32(a: Long): CFloat = extern
   def okm_from_i32(data: Ptr[CInt], shape: Ptr[CInt], ndim: CInt): Long = extern
   def okm_from_f32(data: Ptr[CFloat], shape: Ptr[CInt], ndim: CInt): Long = extern
+  def okm_value_and_grad(fn: CFuncPtr5[Long, Ptr[Long], CInt, Ptr[Long], CInt, CInt], id: Long, ins: Ptr[Long],
+      nin: CInt, argnums: Ptr[CInt], nargs: CInt, value: Ptr[Long], grads: Ptr[Long]): CInt = extern
   def okm_to_f32(a: Long, out: Ptr[CFloat], n: CInt): CInt = extern
   def okm_scalar_f32(v: CFloat): Long = extern
   def okm_add(a: Long, b: Long): Long = extern
@@ -133,6 +135,28 @@ private[mlx] object Okm:
     val out = alloc[CFloat](math.max(n, 1))
     val got = C.okm_to_f32(a, out, n)
     if got < 0 then null else Array.tabulate(math.min(got, n))(i => out(i))
+  }
+  /** the C callback: the function registered under `id` (Grad); -1 if it throws */
+  private val callback = CFuncPtr5.fromScalaFunction[Long, Ptr[Long], CInt, Ptr[Long], CInt, CInt] {
+    (id: Long, ins: Ptr[Long], nin: CInt, outs: Ptr[Long], maxout: CInt) =>
+      try
+        val out = Grad.call(id, Array.tabulate(nin)(k => ins(k)))
+        if out.length > maxout then -1
+        else
+          for k <- out.indices do outs(k) = out(k)
+          out.length
+      catch case _: Throwable => -1
+  }
+  def valueAndGrad(id: Long, ins: Array[Long], argnums: Array[Int]): (Long, Array[Long]) | Null = Zone.acquire {
+    implicit z =>
+      val i = alloc[Long](math.max(1, ins.length))
+      for k <- ins.indices do i(k) = ins(k)
+      val a = alloc[CInt](math.max(1, argnums.length))
+      for k <- argnums.indices do a(k) = argnums(k)
+      val v = alloc[Long](1)
+      val g = alloc[Long](math.max(1, argnums.length))
+      val rc = C.okm_value_and_grad(callback, id, i, ins.length, a, argnums.length, v, g)
+      if rc != 0 then null else (v(0), Array.tabulate(argnums.length)(k => g(k)))
   }
   def scalarF32(v: Float): Long = C.okm_scalar_f32(v)
   def add(a: Long, b: Long): Long = C.okm_add(a, b)

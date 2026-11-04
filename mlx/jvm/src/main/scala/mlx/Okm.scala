@@ -47,6 +47,7 @@ private[mlx] object Okm:
   private val hItemF32 = fn("okm_item_f32", F, J)
   private val hFromI32 = fn("okm_from_i32", J, J, J, I)
   private val hFromF32 = fn("okm_from_f32", J, J, J, I)
+  private val hValueAndGrad = fn("okm_value_and_grad", I, J, J, J, I, J, I, J, J)
   private val hToF32 = fn("okm_to_f32", I, J, J, I)
   private val hScalarF32 = fn("okm_scalar_f32", J, F)
   private val hAdd = fn("okm_add", J, J, J)
@@ -165,6 +166,36 @@ private[mlx] object Okm:
       val got: Int = hToF32.invokeExact(a, out.address(), n)
       if got < 0 then null else out.asSlice(0, 4L * math.min(got, n)).toArray(JAVA_FLOAT)
     finally arena.close()
+  /** autograd: `okm_value_and_grad` with the callback stub below; (the value, the gradients), or null */
+  def valueAndGrad(id: Long, ins: Array[Long], argnums: Array[Int]): (Long, Array[Long]) | Null =
+    val arena = Arena.ofConfined()
+    try
+      val i = arena.allocateFrom(JAVA_LONG, ins*)
+      val a = arena.allocateFrom(JAVA_INT, argnums*)
+      val v = arena.allocate(JAVA_LONG)
+      val g = arena.allocate(JAVA_LONG, math.max(1, argnums.length).toLong)
+      val rc: Int = hValueAndGrad.invokeExact(callbackStub.address(), id, i.address(), ins.length, a.address(),
+        argnums.length, v.address(), g.address())
+      if rc != 0 then null else (v.get(JAVA_LONG, 0), g.asSlice(0, 8L * argnums.length).toArray(JAVA_LONG))
+    finally arena.close()
+  /** the C callback `okm_fn(id, ins, nin, outs, maxout)`: the function registered under `id` (Grad), its inputs read,
+   * its outputs written; -1 if it throws (an exception must not cross into C) */
+  final class Callback:
+    def call(id: Long, ins: MemorySegment, nin: Int, outs: MemorySegment, maxout: Int): Int =
+      try
+        val in = ins.reinterpret(8L * nin)
+        val out = Grad.call(id, Array.tabulate(nin)(k => in.getAtIndex(JAVA_LONG, k.toLong)))
+        if out.length > maxout then -1
+        else
+          val o = outs.reinterpret(8L * maxout)
+          for k <- out.indices do o.setAtIndex(JAVA_LONG, k.toLong, out(k))
+          out.length
+      catch case _: Throwable => -1
+  private lazy val callbackStub: MemorySegment =
+    val mt = java.lang.invoke.MethodType.methodType(classOf[Int], classOf[Long], classOf[MemorySegment], classOf[Int],
+      classOf[MemorySegment], classOf[Int])
+    val h = java.lang.invoke.MethodHandles.lookup().findVirtual(classOf[Callback], "call", mt).bindTo(Callback())
+    linker.upcallStub(h, FunctionDescriptor.of(I, J, ADDRESS, I, ADDRESS, I), Arena.global())
   def scalarF32(v: Float): Long = hScalarF32.invokeExact(v)
   def add(a: Long, b: Long): Long = hAdd.invokeExact(a, b)
   def multiply(a: Long, b: Long): Long = hMultiply.invokeExact(a, b)
