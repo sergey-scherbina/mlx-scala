@@ -8,16 +8,26 @@ import mlx.Mlx.*
  * random, B zero, so training starts from the model as it is — trained by AdamW on the cross-entropy of an example's
  * answer tokens (the prompt's not counted). Gradients by `Mlx.valueAndGrad`, the adapters its inputs.
  */
-final class Lora(val model: Qwen3, rank: Int = 8, projs: Seq[String] = Seq("q", "v"), layers: Seq[Int] = Nil,
+/** a model whose projections take LoRA adapters (`"<layer>.<proj>"` → (A, B)): what `Lora` trains */
+trait Adaptable extends Model:
+  var lora: Map[String, (Arr, Arr)]
+  var loraScale: Float
+  def layerCount: Int
+  /** a projection's input and output widths, if layer `i` has it */
+  def widths(i: Int, proj: String): Option[(Int, Int)]
+  /** gradients wanted through the forward pass (a model whose fast path has none takes a slower one) */
+  def training(on: Boolean): Unit = ()
+
+final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("q", "v"), layers: Seq[Int] = Nil,
     alpha: Float = 16f, lr: Float = 1e-4f, weightDecay: Float = 0f, seed: Long = 1):
   private val keep = new Scope
-  private val at = if layers.nonEmpty then layers else 0 until model.config.layers
-  val names: Vector[String] = (for i <- at; p <- projs yield s"$i.$p").toVector
+  private val at = if layers.nonEmpty then layers else 0 until model.layerCount
+  val names: Vector[String] = (for i <- at; p <- projs if model.widths(i, p).isDefined yield s"$i.$p").toVector
   private val r = scala.util.Random(seed)
   // the parameters, A then B for each adapter; AdamW's moments
   private var params: Vector[Arr] = names.flatMap { n =>
     val Array(i, p) = n.split('.')
-    val (in, out) = model.widths(i.toInt, p)
+    val (in, out) = model.widths(i.toInt, p).get
     val std = 1f / math.sqrt(in).toFloat
     Vector(floats(Array.fill(in * rank)(r.nextGaussian().toFloat * std), in, rank)(using keep),
       zeros(Seq(rank, out), Dtype.Float32)(using keep))
@@ -29,6 +39,7 @@ final class Lora(val model: Qwen3, rank: Int = 8, projs: Seq[String] = Seq("q", 
   def size: Long = params.map(_.shape.product.toLong).sum
 
   private def attach(ps: Seq[Arr]): Unit =
+    model.training(true)
     model.lora = names.zipWithIndex.map((n, k) => n -> (ps(2 * k), ps(2 * k + 1))).toMap
     model.loraScale = alpha / rank
 
@@ -38,7 +49,7 @@ final class Lora(val model: Qwen3, rank: Int = 8, projs: Seq[String] = Seq("q", 
     val st = model.newState()
     try
       val n = ids.length
-      val logits = astype(model.logits(ints(ids, 1, n), st.caches, all = true), Dtype.Float32)
+      val logits = astype(model.logitsAll(ints(ids, 1, n), st), Dtype.Float32)
       val vocab = logits.dim(-1)
       val pred = reshape(slice(logits, Seq(0, from - 1, 0), Seq(1, n - 1, vocab)), n - from, vocab)
       val target = ints(ids.drop(from), n - from, 1)
@@ -55,6 +66,7 @@ final class Lora(val model: Qwen3, rank: Int = 8, projs: Seq[String] = Seq("q", 
     finally
       s.close()
       model.lora = Map.empty
+      model.training(false)
 
   /** one AdamW step on an example: its loss before the step */
   def step(ids: Array[Int], from: Int): Float =
@@ -85,10 +97,15 @@ final class Lora(val model: Qwen3, rank: Int = 8, projs: Seq[String] = Seq("q", 
     finally
       s.close()
       model.lora = Map.empty
+      model.training(false)
 
   /** the adapters on the model, for generation; `detach` takes them off */
-  def attachTrained(): Unit = attach(params)
-  def detach(): Unit = model.lora = Map.empty
+  def attachTrained(): Unit =
+    attach(params)
+    model.training(false) // generation: the fast path
+  def detach(): Unit =
+    model.lora = Map.empty
+    model.training(false)
   def close(): Unit =
     detach()
     keep.close()

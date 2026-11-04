@@ -217,12 +217,21 @@ private[mlx] object Okm:
   def sliceUpdate(src: Long, upd: Long, start: Array[Int], stop: Array[Int]): Long =
     hSliceUpdate.invokeExact(src, upd, ints(0, start), ints(1, stop), start.length)
   def concatenate(as: Array[Long], axis: Int): Long =
-    val s = scratch.get()
-    // handles in slots 2..3 (32 words)
-    var i = 0
-    while i < as.length do
-      s.set(JAVA_LONG, 128L + i * 8L, as(i)); i += 1
-    hConcatenate.invokeExact(s.address() + 128L, as.length, axis)
+    if as.length > 16 then
+      // more than the scratch holds (a sequence's steps): a buffer of their own
+      val arena = Arena.ofConfined()
+      try
+        val p = arena.allocateFrom(JAVA_LONG, as*)
+        val r: Long = hConcatenate.invokeExact(p.address(), as.length, axis)
+        r
+      finally arena.close()
+    else
+      val s = scratch.get()
+      // handles in slots 2..3 (16 words: 128 bytes from byte 128)
+      var i = 0
+      while i < as.length do
+        s.set(JAVA_LONG, 128L + i * 8L, as(i)); i += 1
+      hConcatenate.invokeExact(s.address() + 128L, as.length, axis)
   def zeros(shape: Array[Int], dtype: Int): Long = hZeros.invokeExact(ints(0, shape), shape.length, dtype)
   def quantizedMatmul(x: Long, w: Long, scales: Long, biases: Long, transpose: Boolean, groupSize: Int, bits: Int)
       : Long = hQmm.invokeExact(x, w, scales, biases, if transpose then 1 else 0, groupSize, bits)

@@ -104,7 +104,7 @@ object KvCache:
 
 /** QWEN3: a decoder of `layers` blocks — attention with GQA and q/k RMS norms, RoPE; a SwiGLU MLP — over quantized
  * weights; the embedding is the output layer too (tied) */
-final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], own: Scope) extends Model:
+final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], own: Scope) extends Adaptable:
   import config.*
   private def w(name: String): Arr = weights.getOrElse(name, sys.error(s"no weight $name"))
   private def lin(prefix: String) =
@@ -139,9 +139,10 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
         val t = x.dtype
         add(base(x), multiply(matmul(matmul(x, astype(a, t)), astype(b, t)), astype(scalar(loraScale), t)))
   /** a projection's input and output widths: what an adapter on it is shaped by */
-  def widths(i: Int, proj: String): (Int, Int) =
+  def layerCount: Int = layers
+  def widths(i: Int, proj: String): Option[(Int, Int)] =
     val l = blocks(i)
-    val p = proj match
+    val p: QLinear | Null = proj match
       case "q" => l.q
       case "k" => l.k
       case "v" => l.v
@@ -149,8 +150,8 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       case "gate" => l.gate
       case "up" => l.up
       case "down" => l.down
-      case other => sys.error(s"no projection $other")
-    (p.inDim, p.outDim)
+      case _ => null
+    if p == null then None else Some((p.nn.inDim, p.nn.outDim))
   private val embed = lin("model.embed_tokens")
   private val norm = w("model.norm.weight")
   private val scale = (1.0 / math.sqrt(headDim)).toFloat

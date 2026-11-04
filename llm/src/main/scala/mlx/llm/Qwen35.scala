@@ -96,7 +96,7 @@ object LinearState:
  * gate and partial RoPE; its MLP dense, or a mixture of experts (top-k of many, and a shared expert) — over quantized
  * weights. As MLX's mlx_lm (qwen3_5.py, qwen3_next.py, gated_delta.py) computes it */
 final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr], own: Scope,
-    hotExperts: Map[String, ExpertCache]) extends Model:
+    hotExperts: Map[String, ExpertCache]) extends Adaptable:
   import config.*
   private val P = "language_model.model."
   private def w(name: String): Arr = weights.getOrElse(name, sys.error(s"no weight $name"))
@@ -189,6 +189,29 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     lazy val sharedRouter: QLinear = lin(s"$p.mlp.shared_expert_gate")
 
   private val blocks = Vector.tabulate(layers)(Layer(_))
+  /** LoRA adapters (`Adaptable`): `"<layer>.<proj>"` → (A, B) on o (full attention), out (linear), gate, up, down */
+  var lora: Map[String, (Arr, Arr)] = Map.empty
+  var loraScale: Float = 1f
+  /** while training, the delta rule by ops (differentiable) instead of its kernel */
+  private var differentiable = false
+  override def training(on: Boolean): Unit = differentiable = on
+  def layerCount: Int = layers
+  private def adapted(i: Int, proj: String, base: QLinear, x: Arr)(using Scope): Arr =
+    lora.get(s"$i.$proj") match
+      case None => base(x)
+      case Some((a, b)) =>
+        val t = x.dtype
+        add(base(x), multiply(matmul(matmul(x, astype(a, t)), astype(b, t)), astype(scalar(loraScale), t)))
+  def widths(i: Int, proj: String): Option[(Int, Int)] =
+    val l = blocks(i)
+    val p: QLinear | Null = proj match
+      case "o" if !l.linear => l.o
+      case "out" if l.linear => l.out
+      case "gate" if experts == 0 => l.gate
+      case "up" if experts == 0 => l.up
+      case "down" if experts == 0 => l.down
+      case _ => null
+    if p == null then None else Some((p.nn.inDim, p.nn.outDim))
   private val embed = lin(s"${P}embed_tokens")
   private val head = if weights.contains("language_model.lm_head.weight") then lin("language_model.lm_head") else embed
   private val norm = w(s"${P}norm.weight")
@@ -262,7 +285,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     val vs = transpose(reshape(l.v(x), 1, n, kvHeads, headDim), 0, 2, 1, 3)
     val (keys, values) = cache.update(ks, vs)
     val a = Mlx.attention(qs, keys, values, (1.0 / math.sqrt(headDim)).toFloat, causal = n > 1)
-    l.o(multiply(reshape(transpose(a, 0, 2, 1, 3), 1, n, heads * headDim), sigmoid(gate)))
+    adapted(l.i, "o", l.o, multiply(reshape(transpose(a, 0, 2, 1, 3), 1, n, heads * headDim), sigmoid(gate)))
 
   private val inv = (1.0 / math.sqrt(linearKeyDim)).toFloat
   /** the readout scales inv² and inv at an array type, made once: an `astype` a step is a kernel a step */
@@ -304,6 +327,12 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       else (if steps then Qwen35.deltaRuleSteps else Qwen35.deltaRule, (32, linearValueDim, linearValueHeads),
         (32, 4, 1))
     val stateShape = Seq(1, linearValueHeads, linearValueDim, linearKeyDim)
+    if differentiable then
+      // training: the delta rule step by step in ops, as mlx_lm's gated_delta_ops — the kernel has no gradient
+      val (y, last) = deltaOps(q, k, v, g, beta, state, n)
+      st.keep(keep, last)
+      val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
+      return adapted(l.i, "out", l.out, reshape(gated, 1, n, valueDim))
     val outs = kernel(Seq(q, k, v, g, beta, state, int(n)), Seq(Seq(1, n, linearValueHeads, linearValueDim),
       stateShape) ++ (if steps then Seq(1 +: n +: stateShape.tail) else Nil),
       Seq(x.dtype, Dtype.Float32) ++ (if steps then Seq(Dtype.Float32) else Nil),
@@ -314,10 +343,36 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     if steps then st.record(outs(2), input, convKernel)
     // the gated RMS norm: silu(z) · norm(y), in float32
     val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
-    l.out(reshape(gated, 1, n, valueDim))
+    adapted(l.i, "out", l.out, reshape(gated, 1, n, valueDim))
+
+  /** the gated delta rule by ops, a position at a time (mlx_lm's `_gated_delta_step_ops`): per value head h, the
+   * state [Dv, Dk] decayed by g, corrected toward v along k by beta, read along q. q, k [1, n, Hk, Dk] (key heads
+   * shared by Hv / Hk value heads), v [1, n, Hv, Dv], g and beta [1, n, Hv], the state [1, Hv, Dv, Dk] in float32 */
+  private def deltaOps(q: Arr, k: Arr, v: Arr, g: Arr, beta: Arr, state0: Arr, n: Int)(using Scope): (Arr, Arr) =
+    val r = linearValueHeads / linearKeyHeads
+    val ones = floats(Array.fill(r)(1f), 1, 1, 1, r, 1)
+    def heads(t: Arr) = // [1, n, Hk, Dk] → [1, n, Hv, Dk], each key head for its r value heads
+      reshape(multiply(expandDims(astype(t, Dtype.Float32), 3), ones), 1, n, linearValueHeads, linearKeyDim)
+    val (qh, kh, vf) = (heads(q), heads(k), astype(v, Dtype.Float32))
+    val (gf, bf) = (astype(g, Dtype.Float32), astype(beta, Dtype.Float32))
+    def at(t: Arr, i: Int) = reshape(slice(t, Seq(0, i, 0, 0).take(t.ndim), (Seq(1, i + 1) ++ t.shape.drop(2))),
+      (1 +: t.shape.drop(2))*)
+    var state = state0
+    val ys = (0 until n).map { i =>
+      val (qi, ki, vi) = (at(qh, i), at(kh, i), at(vf, i)) // [1, Hv, Dk], [1, Hv, Dk], [1, Hv, Dv]
+      val gi = reshape(slice(gf, Seq(0, i, 0), Seq(1, i + 1, linearValueHeads)), 1, linearValueHeads, 1, 1)
+      val bi = reshape(slice(bf, Seq(0, i, 0), Seq(1, i + 1, linearValueHeads)), 1, linearValueHeads, 1)
+      state = multiply(state, gi)
+      val mem = sum(multiply(state, expandDims(ki, 2)), -1) // [1, Hv, Dv]
+      val delta = multiply(subtract(vi, mem), bi)
+      state = add(state, multiply(expandDims(ki, 2), expandDims(delta, -1)))
+      expandDims(sum(multiply(state, expandDims(qi, 2)), -1), 1) // [1, 1, Hv, Dv]
+    }
+    (astype(concatenate(ys, 1), q.dtype), state)
 
   private def mlp(l: Layer, x: Arr, n: Int)(using Scope): Arr =
-    if experts == 0 then l.down(swiglu(l.gate(x), l.up(x)))
+    if experts == 0 then
+      adapted(l.i, "down", l.down, swiglu(adapted(l.i, "gate", l.gate, x), adapted(l.i, "up", l.up, x)))
     else
       val gates = softmax(l.router(x), -1)
       val inds = slice(argpartition(gates, experts - expertsPerToken, -1), Seq(0, 0, experts - expertsPerToken),
