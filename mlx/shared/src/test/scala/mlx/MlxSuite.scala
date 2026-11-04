@@ -59,7 +59,7 @@ class MlxSuite extends munit.FunSuite:
     assertEqualsFloat(b, 1f, 1e-2f)
     s.close()
 
-  test("conv2d: a 3 x 3 convolution, padded, as the sum says; its gradient flows"):
+  test("conv2d: a 3 x 3 convolution, padded, as the sum says; its gradient flows; max, maximum"):
     val s = new Scope
     given Scope = s
     val (h, w, ci, co) = (4, 5, 2, 3)
@@ -78,6 +78,9 @@ class MlxSuite extends munit.FunSuite:
     assertEquals(g(0).shape, Vector(co, 3, 3, ci))
     // d(sum)/d w[o, 1, 1, i] = the sum of channel i over the board (the centre tap sees every point)
     assertEqualsFloat(g(0).toFloats((1 * 3 + 1) * ci), (0 until h * w).map(p => xs(p * ci)).sum, 1e-4f)
+    val m = floats(Array(1f, -2f, 5f, 0.5f, -1f, 3f), 2, 3)
+    assertEquals(max(m, 1).toFloats.toVector, Vector(5f, 3f))
+    assertEquals(maximum(m, scalar(0f)).toFloats.toVector, Vector(1f, 0f, 5f, 0.5f, 0f, 3f))
     s.close()
 
   test("a scope frees what it made; a result moved out is kept"):

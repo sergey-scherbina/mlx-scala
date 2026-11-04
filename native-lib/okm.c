@@ -134,6 +134,8 @@ void* okm_logsumexp(void* a, int axis, int keepdims) { RET(mlx_logsumexp_axis(&r
 void* okm_logaddexp(void* a, void* b) { RET(mlx_logaddexp(&r, A(a), A(b), S)); }
 void* okm_contiguous(void* a) { RET(mlx_contiguous(&r, A(a), false, S)); }
 void* okm_sum(void* a, int axis, int keepdims) { RET(mlx_sum_axis(&r, A(a), axis, keepdims, S)); }
+void* okm_max(void* a, int axis, int keepdims) { RET(mlx_max_axis(&r, A(a), axis, keepdims, S)); }
+void* okm_maximum(void* a, void* b) { RET(mlx_maximum(&r, A(a), A(b), S)); }
 void* okm_expand_dims(void* a, int axis) { RET(mlx_expand_dims(&r, A(a), axis, S)); }
 void* okm_squeeze(void* a, int axis) { RET(mlx_squeeze_axis(&r, A(a), axis, S)); }
 void* okm_argpartition(void* a, int kth, int axis) { RET(mlx_argpartition_axis(&r, A(a), kth, axis, S)); }

@@ -63,6 +63,8 @@ private object C:
   def okm_logaddexp(a: Long, b: Long): Long = extern
   def okm_contiguous(a: Long): Long = extern
   def okm_sum(a: Long, axis: CInt, keepdims: CInt): Long = extern
+  def okm_max(a: Long, axis: CInt, keepdims: CInt): Long = extern
+  def okm_maximum(a: Long, b: Long): Long = extern
   def okm_expand_dims(a: Long, axis: CInt): Long = extern
   def okm_squeeze(a: Long, axis: CInt): Long = extern
   def okm_argpartition(a: Long, kth: CInt, axis: CInt): Long = extern
@@ -216,6 +218,8 @@ private[mlx] object Okm:
   def logaddexp(a: Long, b: Long): Long = C.okm_logaddexp(a, b)
   def contiguous(a: Long): Long = C.okm_contiguous(a)
   def sum(a: Long, axis: Int, keepdims: Boolean): Long = C.okm_sum(a, axis, if keepdims then 1 else 0)
+  def max(a: Long, axis: Int, keepdims: Boolean): Long = C.okm_max(a, axis, if keepdims then 1 else 0)
+  def maximum(a: Long, b: Long): Long = C.okm_maximum(a, b)
   def expandDims(a: Long, axis: Int): Long = C.okm_expand_dims(a, axis)
   def squeeze(a: Long, axis: Int): Long = C.okm_squeeze(a, axis)
   def argpartition(a: Long, kth: Int, axis: Int): Long = C.okm_argpartition(a, kth, axis)

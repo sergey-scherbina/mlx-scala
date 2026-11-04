@@ -145,6 +145,9 @@ object Mlx:
   def softplus(a: Arr)(using s: Scope): Arr = logaddexp(a, astype(scalar(0f), a.dtype))
   def contiguous(a: Arr)(using s: Scope): Arr = s.own(Okm.contiguous(a.h))
   def sum(a: Arr, axis: Int, keepdims: Boolean = false)(using s: Scope): Arr = s.own(Okm.sum(a.h, axis, keepdims))
+  def max(a: Arr, axis: Int, keepdims: Boolean = false)(using s: Scope): Arr = s.own(Okm.max(a.h, axis, keepdims))
+  /** the larger of the two, element by element (broadcast) */
+  def maximum(a: Arr, b: Arr)(using s: Scope): Arr = s.own(Okm.maximum(a.h, b.h))
   def expandDims(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.expandDims(a.h, axis))
   def squeeze(a: Arr, axis: Int)(using s: Scope): Arr = s.own(Okm.squeeze(a.h, axis))
   def argpartition(a: Arr, kth: Int, axis: Int)(using s: Scope): Arr = s.own(Okm.argpartition(a.h, kth, axis))
