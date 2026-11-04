@@ -34,6 +34,7 @@ final class Names(members: Map[String, Set[String]], texts: Int => String, vocab
 
   private val After = """(?:^|[^\w$.])([A-Za-z_$][\w$]*)$""".r.unanchored
   private val Inside = """(?:^|[^\w$.])([A-Za-z_$][\w$]*)\.([\w$]*)$""".r.unanchored
+  private val Declares = """(?:^|[^\w$.])(?:object|class|trait|enum)\s+([A-Za-z_$][\w$]*)$""".r.unanchored
 
   /** the state: Some(owner, Some(partial)) after `Owner.partial`, Some(owner, None) after `Owner`, None: free */
   def state: Option[(String, Option[String])] =
@@ -43,7 +44,14 @@ final class Names(members: Map[String, Set[String]], texts: Int => String, vocab
       case After(o) if members.contains(o) => Some((o, None))
       case _ => None
 
-  def allowed: Option[Array[Int]] = state.map { (owner, partial) =>
+  /** a declaration naming one of the owners (`object Tasty`): it would shadow the real one — the name must go on into
+   * another (only tokens continuing the identifier), unless the project declares it here itself */
+  def shadows: Boolean = text.takeRight(200).toString match
+    case Declares(n) => members.contains(n)
+    case _ => false
+
+  def allowed: Option[Array[Int]] = if shadows then Some((0 until vocabSize).filter(t =>
+    texts(t).nonEmpty && isId(texts(t).head)).toArray) else state.map { (owner, partial) =>
     constrained += 1
     val ok = Array.newBuilder[Int]
     var t = 0

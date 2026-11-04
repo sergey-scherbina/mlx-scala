@@ -67,6 +67,14 @@ class NamesSuite extends munit.FunSuite:
     r.took(0)
     assertEquals(r.allowed.map(_.map(w).toSet), Some(Set("Tools", " then", " match", "\n")))
 
+  test("a declaration naming an owner must go on into another name"):
+    val w = Vector("object ", "Tools", "2", ":", " Tools", "Other")
+    val p = new Names(members, w, w.size)
+    p.took(0); p.took(1)
+    assertEquals(p.allowed.map(_.map(w).toSet), Some(Set("object ", "Tools", "2", "Other"))) // an identifier's chars first
+    p.took(2)
+    assert(!p.shadows)
+
   test("owners and members from SemanticDB symbols"):
     val m = Names.fromSymbols(Seq("symdex/Equivalence." -> "Equivalence", "symdex/Equivalence.target()." -> "target",
       "symdex/Equivalence.Target#" -> "Target", "symdex/Equivalence.Target#arity." -> "arity",
