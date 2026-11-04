@@ -191,6 +191,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
 
   private val blocks = Vector.tabulate(layers)(Layer(_))
   /** LoRA adapters (`Adaptable`): `"<layer>.<proj>"` → (A, B) on o (full attention), out (linear), gate, up, down */
+  /** after each layer, the residual stream [1, n, hidden] to a hook (as Qwen3.Hook): read or changed; none by default */
+  var hook: Qwen3.Hook | Null = null
   var lora: Map[String, (Arr, Arr)] = Map.empty
   var loraScale: Float = 1f
   /** while training, the delta rule by ops (differentiable) instead of its kernel */
@@ -203,9 +205,12 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       case Some((a, b)) =>
         val t = x.dtype
         add(base(x), multiply(matmul(matmul(x, astype(a, t)), astype(b, t)), astype(scalar(loraScale), t)))
+  /** layer `layers` (one past the last): the draft layer's, and its `fc` too */
   def widths(i: Int, proj: String): Option[(Int, Int)] =
-    val l = blocks(i)
+    if i == layers && mtpLayer == null then return None
+    val l = if i == layers then mtpLayer.nn else blocks(i)
     val p: QLinear | Null = proj match
+      case "fc" if i == layers => mtpFc
       case "o" if !l.linear => l.o
       case "out" if l.linear => l.out
       case "gate" if experts == 0 => l.gate
@@ -421,7 +426,7 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     val x = Scope(s) {
       val e = rmsNorm(reshape(embed.rows(reshape(ids, n)), 1, n, hidden), mtpEmbedNorm, eps)
       val hh = rmsNorm(h, mtpHiddenNorm, eps)
-      mtpFc(concatenate(Seq(e, hh), -1)) // the embedding first, as the checkpoint was trained
+      adapted(layers, "fc", mtpFc, concatenate(Seq(e, hh), -1)) // the embedding first, as the checkpoint was trained
     }
     val y = Scope(s) {
       val a = add(x, attention(l, rmsNorm(x, l.inNorm, eps), n, d.asInstanceOf[KvCache]))
@@ -444,7 +449,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
           case c: KvCache => attention(l, normed, n, c)
           case st: LinearState => linearAttention(l, normed, n, st)
         val a = add(x, r)
-        add(a, mlp(l, rmsNorm(a, l.postNorm, eps), n))
+        val out = add(a, mlp(l, rmsNorm(a, l.postNorm, eps), n))
+        if hook == null then out else hook.nn.after(i, out)
       }
       s.release(x)
       i += 1
