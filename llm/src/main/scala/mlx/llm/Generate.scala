@@ -78,6 +78,26 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         ok.foreach(t => if t >= 0 && t < v then flags(t) = 1)
         where(greater(ints(flags, 1, v), int(0)), logits, astype(scalar(Float.NegativeInfinity), logits.dtype))
 
+  /** of whole continuations after `token` (read, not yet fed), the one the model scores best: each fed from a
+   * checkpoint (`token` and it), its tokens' log-probabilities summed, the state put back */
+  private def best(token: Int, alts: Seq[Array[Int]]): Array[Int] =
+    val st = state.nn
+    val scored = alts.map { a =>
+      val at = st.checkpoint()
+      val input = token +: a
+      val lp = Scope(carry) {
+        val logits = astype(model.logitsAll(ints(input, 1, input.length), st), Dtype.Float32)
+        val v = logits.dim(-1)
+        val probs = softmax(reshape(logits, input.length, v), 1)
+        // the probability of each alternative's token where it comes: rows 0 .. a.length − 1
+        takeAlong(probs, ints(a ++ Array(0), input.length, 1), 1).toFloats.take(a.length)
+      }
+      st.rewind(at, 0): Unit // back to the checkpoint itself (a recurrent state can too): nothing to feed again
+      at.close()
+      (a, lp.map(p => math.log(math.max(p, 1e-30f).toDouble)).sum)
+    }
+    scored.maxBy(_._2)._1
+
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
   def next(): Option[Int] =
     if finished then None
@@ -120,7 +140,14 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         carry.release(current)
         port.nn.took(token)
         ready += token
-        y = if made + 1 < maxTokens then step(Scope(carry)(ints(Array(token), 1, 1))) else null
+        val alts = if made + 1 < maxTokens then port.nn.choices.map(_.filter(_.nonEmpty)).filter(_.nonEmpty) else None
+        val chosen = alts.map(best(token, _))
+        chosen.foreach { b =>
+          b.foreach(port.nn.took)
+          ready ++= b
+        }
+        val fed = token +: chosen.getOrElse(Array.empty[Int])
+        y = if made + fed.length < maxTokens then step(Scope(carry)(ints(fed, 1, fed.length))) else null
       else
         // the next step built and started BEFORE this one is read — as mlx_lm: the graph's building and encoding
         // overlap the GPU's running this one (read first, they did not: 13% of the decode's speed)

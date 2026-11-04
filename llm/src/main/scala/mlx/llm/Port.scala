@@ -8,6 +8,9 @@ trait Port:
   def allowed: Option[Array[Int]]
   /** the token taken */
   def took(token: Int): Unit
+  /** whole continuations to choose among, now (none: go on token by token): the generation scores each by the
+   * model (the sum of its tokens' log-probabilities), takes the best, each of its tokens then told to `took` */
+  def choices: Option[Seq[Array[Int]]] = None
 
 /**
  * EXACT QUOTES: between the markers `open` and `close` (token sequences), every token continues a span of `source`

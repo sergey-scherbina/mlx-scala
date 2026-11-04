@@ -7,6 +7,12 @@ class NamesSuite extends munit.FunSuite:
   private val members = Map("Tools" -> Set("equivalent", "specs", "query"))
   private def port() = new Names(members, vocab, vocab.size)
   private def take(p: Names, ts: String*) = ts.foreach(t => p.took(vocab.indexOf(t)))
+  // greedy longest match over the vocabulary: a tokenizer's stand-in
+  private def enc(s: String): Array[Int] =
+    if s.isEmpty then Array.empty
+    else
+      val t = vocab.filter(s.startsWith).maxBy(_.length)
+      vocab.indexOf(t) +: enc(s.drop(t.length))
   private def allowed(p: Names) = p.allowed.map(_.map(vocab).toSet)
 
   test("free until an owner; after it, a dot must begin a member, other tokens free"):
@@ -46,6 +52,20 @@ class NamesSuite extends munit.FunSuite:
     val r = port()
     take(r, "query", ".", "Tools")
     assertEquals(allowed(r), None)
+
+  test("choices: the members whole once a selection begins; a dropped dot refused, keywords not"):
+    val p = new Names(members, vocab, vocab.size, enc)
+    take(p, "Tools", ".")
+    assertEquals(p.choices.map(_.map(_.map(vocab).mkString).toSet), Some(Set("equivalent", "specs", "query")))
+    val q = new Names(members, vocab, vocab.size, enc)
+    take(q, "Tools", ".equ")
+    assertEquals(q.choices.map(_.map(_.map(vocab).mkString)), Some(Seq("ivalent")))
+    take(q, "ivalent")
+    assertEquals(q.choices, None)
+    val w = Vector("Tools", " generators", " then", " match", "\n")
+    val r = new Names(members, w, w.size)
+    r.took(0)
+    assertEquals(r.allowed.map(_.map(w).toSet), Some(Set("Tools", " then", " match", "\n")))
 
   test("owners and members from SemanticDB symbols"):
     val m = Names.fromSymbols(Seq("symdex/Equivalence." -> "Equivalence", "symdex/Equivalence.target()." -> "target",

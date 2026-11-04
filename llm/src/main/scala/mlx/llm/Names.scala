@@ -7,7 +7,8 @@ package mlx.llm
  * token must keep `partial` a member's prefix, or complete a member and end the identifier; otherwise free. A dot not
  * followed by an identifier (a sentence's end, `Tools. `) is not a selection: free. `texts`: each token's text.
  */
-final class Names(members: Map[String, Set[String]], texts: Int => String, vocabSize: Int) extends Port:
+final class Names(members: Map[String, Set[String]], texts: Int => String, vocabSize: Int,
+    encode: String => Array[Int] = _ => Array.empty) extends Port:
   private val sorted: Map[String, Array[String]] = members.view.mapValues(_.toArray.sorted).toMap
   private val text = new StringBuilder
   /** how many times a constrained step was asked, and the tokens it allowed on average */
@@ -49,12 +50,28 @@ final class Names(members: Map[String, Set[String]], texts: Int => String, vocab
     while t < vocabSize do
       val s = texts(t)
       val fine = partial match
-        case None => !s.startsWith(".") || fits(owner, s.drop(1))
+        case None => if s.startsWith(".") then fits(owner, s.drop(1)) else !dropsTheDot(s)
         case Some(p) => fits(owner, p + s)
       if fine then ok += t
       t += 1
     ok.result()
   }
+
+  // after an owner, a word with a space and no dot (`Equivalence generators`): a selection with its dot dropped —
+  // refused, but for the keywords that may follow a name
+  private val keywords = Set("then", "else", "do", "match", "extends", "with", "derives", "yield", "if", "case",
+    "while", "for", "new", "end")
+  private def dropsTheDot(s: String): Boolean =
+    val t = s.dropWhile(c => c == ' ' || c == '\t')
+    t.length < s.length && t.nonEmpty && t.head.isLower && !keywords(t.takeWhile(isId))
+
+  /** the members whole, once a selection has begun and is not yet one (`Owner.` or `Owner.imp`): the model
+   * chooses among them by its own scores, not prefix by prefix */
+  override def choices: Option[Seq[Array[Int]]] = state match
+    case Some((owner, Some(p))) if !members(owner).contains(p) =>
+      val ms = members(owner).filter(m => m.startsWith(p) && m.length > p.length).toSeq.sorted
+      if ms.isEmpty then None else Some(ms.map(m => encode(m.drop(p.length))))
+    case _ => None
 
   def took(token: Int): Unit = text ++= texts(token)
 
@@ -62,7 +79,7 @@ object Names:
   /** for a tokenizer's model: each token's text once (bytes as Latin-1: identifiers are ASCII) */
   def apply(tok: Tokenizer, members: Map[String, Set[String]]): Names =
     val texts = Array.tabulate(tok.size)(id => String(tok.bytes(Seq(id)), "ISO-8859-1"))
-    new Names(members, texts, texts.length)
+    new Names(members, texts, texts.length, tok.encode)
 
   /**
    * owners and their members from SemanticDB symbols and names (symdex's `named(S, N)`): `pkg/Obj.m().` → Obj: m;
