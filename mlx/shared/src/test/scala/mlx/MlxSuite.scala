@@ -21,6 +21,17 @@ class MlxSuite extends munit.FunSuite:
     assertEquals(slice(u, Seq(3, 2), Seq(4, 3)).eval().itemInt, 6)
     s.close()
 
+  test("floats in and out, as they were"):
+    val s = new Scope
+    given Scope = s
+    val data = Array(0f, 1.5f, -2.25f, 131072f, 1e-30f, 0.1f)
+    val a = floats(data, 2, 3)
+    assertEquals(a.shape, Vector(2, 3))
+    assertEquals(a.dtype, Dtype.Float32)
+    assertEquals(a.toFloats.toVector, data.toVector)
+    assertEquals(add(a, a).toFloats.toVector, data.map(_ * 2).toVector)
+    s.close()
+
   test("a scope frees what it made; a result moved out is kept"):
     val outer = new Scope
     val kept = Scope(outer) { add(scalar(1f), scalar(2f)) }

@@ -21,6 +21,8 @@ private object C:
   def okm_copy_i32(a: Long, out: Ptr[CInt], n: CInt): CInt = extern
   def okm_item_f32(a: Long): CFloat = extern
   def okm_from_i32(data: Ptr[CInt], shape: Ptr[CInt], ndim: CInt): Long = extern
+  def okm_from_f32(data: Ptr[CFloat], shape: Ptr[CInt], ndim: CInt): Long = extern
+  def okm_to_f32(a: Long, out: Ptr[CFloat], n: CInt): CInt = extern
   def okm_scalar_f32(v: CFloat): Long = extern
   def okm_add(a: Long, b: Long): Long = extern
   def okm_multiply(a: Long, b: Long): Long = extern
@@ -125,6 +127,13 @@ private[mlx] object Okm:
   def itemF32(a: Long): Float = C.okm_item_f32(a)
   def fromI32(data: Array[Int], shape: Array[Int]): Long =
     withInts(shape)(s => C.okm_from_i32(data.at(0), s, shape.length))
+  def fromF32(data: Array[Float], shape: Array[Int]): Long =
+    withInts(shape)(s => C.okm_from_f32(data.at(0), s, shape.length))
+  def toF32(a: Long, n: Int): Array[Float] = Zone.acquire { implicit z =>
+    val out = alloc[CFloat](math.max(n, 1))
+    val got = C.okm_to_f32(a, out, n)
+    if got < 0 then null else Array.tabulate(math.min(got, n))(i => out(i))
+  }
   def scalarF32(v: Float): Long = C.okm_scalar_f32(v)
   def add(a: Long, b: Long): Long = C.okm_add(a, b)
   def multiply(a: Long, b: Long): Long = C.okm_multiply(a, b)

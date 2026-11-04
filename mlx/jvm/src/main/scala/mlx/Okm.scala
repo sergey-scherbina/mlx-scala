@@ -46,6 +46,8 @@ private[mlx] object Okm:
   private val hCopyI32 = fn("okm_copy_i32", I, J, J, I)
   private val hItemF32 = fn("okm_item_f32", F, J)
   private val hFromI32 = fn("okm_from_i32", J, J, J, I)
+  private val hFromF32 = fn("okm_from_f32", J, J, J, I)
+  private val hToF32 = fn("okm_to_f32", I, J, J, I)
   private val hScalarF32 = fn("okm_scalar_f32", J, F)
   private val hAdd = fn("okm_add", J, J, J)
   private val hMultiply = fn("okm_multiply", J, J, J)
@@ -148,6 +150,20 @@ private[mlx] object Okm:
       val d = arena.allocateFrom(JAVA_INT, data*)
       val r: Long = hFromI32.invokeExact(d.address(), ints(0, shape), shape.length)
       r
+    finally arena.close()
+  def fromF32(data: Array[Float], shape: Array[Int]): Long =
+    val arena = Arena.ofConfined()
+    try
+      val d = arena.allocateFrom(JAVA_FLOAT, data*)
+      val r: Long = hFromF32.invokeExact(d.address(), ints(0, shape), shape.length)
+      r
+    finally arena.close()
+  def toF32(a: Long, n: Int): Array[Float] =
+    val arena = Arena.ofConfined()
+    try
+      val out = arena.allocate(JAVA_FLOAT, math.max(n, 1).toLong)
+      val got: Int = hToF32.invokeExact(a, out.address(), n)
+      if got < 0 then null else out.asSlice(0, 4L * math.min(got, n)).toArray(JAVA_FLOAT)
     finally arena.close()
   def scalarF32(v: Float): Long = hScalarF32.invokeExact(v)
   def add(a: Long, b: Long): Long = hAdd.invokeExact(a, b)

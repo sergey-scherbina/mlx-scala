@@ -23,6 +23,11 @@ final class Arr private[mlx] (private[mlx] val h: Long, private[mlx] var owner: 
     val r = Okm.toI32(h, n)
     if r == null then throw MlxError(Okm.error()) else r
   def itemFloat: Float = Okm.itemF32(h)
+  /** all of it, computed now, as floats (row-major) */
+  def toFloats: Array[Float] =
+    val n = shape.product
+    val r = Okm.toF32(h, n)
+    if r == null then throw MlxError(Okm.error()) else r
   /** a handle of its own on the same array, in `to`: the array kept as long as either is (arrays are immutable — a
    * snapshot is a handle) */
   def retain(to: Scope): Arr = to.own(Okm.retain(h))
@@ -78,6 +83,7 @@ object Mlx:
   def init(): Unit = synchronized { if !started then { check(Okm.init()); started = true } }
 
   def ints(data: Array[Int], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromI32(data, shape.toArray))
+  def floats(data: Array[Float], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromF32(data, shape.toArray))
   def scalar(v: Float)(using s: Scope): Arr = s.own(Okm.scalarF32(v))
   def zeros(shape: Seq[Int], dtype: Dtype)(using s: Scope): Arr = s.own(Okm.zeros(shape.toArray, dtype.ordinal))
 

@@ -83,6 +83,18 @@ void* okm_from_i32(const int* data, const int* shape, int ndim) {
   return mlx_array_new_data(data, shape, ndim, MLX_INT32).ctx;
 }
 void* okm_scalar_f32(float v) { return mlx_array_new_float(v).ctx; }
+void* okm_from_f32(const float* data, const int* shape, int ndim) {
+  return mlx_array_new_data(data, shape, ndim, MLX_FLOAT32).ctx;
+}
+// all of it as float32, into out (n at most): its size, or -1
+int okm_to_f32(void* a, float* out, int n) {
+  mlx_array c = mlx_array_new();
+  if (mlx_astype(&c, A(a), MLX_FLOAT32, S) || mlx_array_eval(c)) { mlx_array_free(c); return -1; }
+  int size = (int)mlx_array_size(c);
+  memcpy(out, mlx_array_data_float32(c), sizeof(float) * (size < n ? size : n));
+  mlx_array_free(c);
+  return size;
+}
 
 // ops
 void* okm_add(void* a, void* b) { RET(mlx_add(&r, A(a), A(b), S)); }
