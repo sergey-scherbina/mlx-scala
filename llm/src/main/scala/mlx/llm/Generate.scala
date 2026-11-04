@@ -111,7 +111,8 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
       }
       st.rewind(at, 0): Unit // back to the checkpoint itself (a recurrent state can too): nothing to feed again
       at.close()
-      (a, lp.map(p => math.log(math.max(p, 1e-30f).toDouble)).sum)
+      // the MEAN log-probability per token: a sum would favour the shortest alternative whatever the model means
+      (a, lp.map(p => math.log(math.max(p, 1e-30f).toDouble)).sum / a.length)
     }
     scored.maxBy(_._2)._1
 
