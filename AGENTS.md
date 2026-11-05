@@ -49,3 +49,10 @@ Rules:
 Build: `native-lib/build.sh` once; `sbt test` (JVM and Native); `sbt publishLocal` for okay-mlx. Scala Native has
 no `java.time`, no `java.text.Normalizer`: write it, as `Nfc` and `ChatTemplate.strftime` do. Tests embed resources
 on Native (`withEmbedResources`). Lines of code at most 120 characters.
+- Embeddings (`Embedder`): Qwen3-Embedding (Qwen3's `hiddenStates`: the last token after the final norm, L2-normed;
+  a query `Instruct: <task>\nQuery:<text>`) — equal to mlx_lm's on the same 4-bit model (EmbedderSuite). On the CPU:
+  `Mlx.onCpu` (okm_use_cpu: a thread's ops on MLX's CPU stream) with the weights unpacked to float32 (`densify`:
+  MLX's quantized products on the CPU take minutes) — 247 ms a 200-token text against 31 on the GPU, the GPU free.
+  `EmbedTrain`: contrastive LoRA (InfoNCE, in-batch negatives); while training, Qwen3's attention by ops (the fused
+  kernel has no gradient for short queries). Code search (`searchBench`, `embedTrainBench`, pairs from okay-forge's
+  SearchPairs): held-out projects MRR 0.480 → 0.598, @1 34.1 → 47.3 in 2 minutes on 333 pairs.

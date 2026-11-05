@@ -21,13 +21,23 @@ object Qwen3Config:
 
 /** a linear layer with quantized weights: x · wᵀ */
 final class QLinear(w: Arr, scales: Arr, biases: Arr, groupSize: Int, bits: Int):
-  def apply(x: Arr)(using Scope): Arr = quantizedMatmul(x, w, scales, biases, transpose = true, groupSize, bits)
+  // DENSE (`densify`): the weights unpacked once [out, in] — on the CPU, MLX has no fast kernel for quantized
+  // products (Qwen3-Embedding-0.6B: minutes a text), a plain matmul is BLAS's
+  private var dense: Arr | Null = null
+  def apply(x: Arr)(using Scope): Arr =
+    if dense == null then quantizedMatmul(x, w, scales, biases, transpose = true, groupSize, bits)
+    else matmul(astype(x, dense.nn.dtype), transpose(dense.nn, 1, 0))
   /** its input and output widths (the weights packed `32 / bits` to a 32-bit word) */
   def inDim: Int = w.dim(1) * (32 / bits)
   def outDim: Int = w.dim(0)
   /** rows of the weights, dequantized: an embedding's lookup */
   def rows(ids: Arr)(using Scope): Arr =
-    dequantize(take(w, ids, 0), take(scales, ids, 0), take(biases, ids, 0), groupSize, bits)
+    if dense != null then take(dense.nn, ids, 0)
+    else dequantize(take(w, ids, 0), take(scales, ids, 0), take(biases, ids, 0), groupSize, bits)
+  /** the weights unpacked to `dtype`, kept in `owner`: products by a plain matmul from now on */
+  def densify(dtype: Dtype, owner: Scope): Unit =
+    if dense == null then
+      dense = Scope(owner)(astype(dequantize(w, scales, biases, groupSize, bits), dtype).eval())
 
 /** A LAYER'S KV CACHE: keys and values of the positions so far, in buffers grown 256 positions at a time; the new
  * positions written in place (`slice_update`), the positions so far a view */
@@ -181,6 +191,22 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
   def logitsAll(ids: Arr, state: Model.State)(using Scope): Arr =
     logits(ids, state.asInstanceOf[State].caches, all = true)
 
+  /** while training, attention by ops: MLX's fused kernel has no gradient for a short query ("the vector kernels do
+   * not produce a logsumexp") — a query head's group of `heads / kvHeads` on its key head, the future masked */
+  private var differentiable = false
+  override def training(on: Boolean): Unit = differentiable = on
+  private def attentionByOps(q: Arr, keys: Arr, values: Arr, n: Int, offset: Int)(using Scope): Arr =
+    val rep = config.heads / kvHeads
+    val t = keys.dim(2)
+    val qg = reshape(q, 1, kvHeads, rep * n, headDim)
+    val s = astype(multiply(matmul(qg, transpose(keys, 0, 1, 3, 2)), astype(scalar(scale), q.dtype)), Dtype.Float32)
+    val mask = Array.tabulate(rep * n * t) { k =>
+      val (row, j) = (k / t, k % t)
+      if j <= offset + row % n then 0f else -1e9f
+    }
+    val p = astype(softmax(add(s, floats(mask, rep * n, t)), -1), q.dtype)
+    reshape(matmul(p, values), 1, config.heads, n, headDim)
+
   private def attention(i: Int, l: Layer, x: Arr, n: Int, cache: KvCache)(using Scope): Arr =
     val offset = cache.offset
     def split(t: Arr, count: Int) = transpose(reshape(t, 1, n, count, headDim), 0, 2, 1, 3)
@@ -191,7 +217,8 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
     val k = rope(transpose(rmsNorm(reshape(kx, 1, n, kvHeads, headDim), l.kNorm, eps), 0, 2, 1, 3),
       headDim, false, ropeTheta, 1f, offset)
     val (keys, values) = cache.update(k, split(adapted(i, "v", l.v, x), kvHeads))
-    val a = Mlx.attention(q, keys, values, scale, causal = n > 1)
+    val a = if differentiable then attentionByOps(q, keys, values, n, offset)
+      else Mlx.attention(q, keys, values, scale, causal = n > 1)
     adapted(i, "o", l.o, reshape(transpose(a, 0, 2, 1, 3), 1, n, config.heads * headDim))
 
   /** the next token's logits after `ids` [1, n], the cache moved on by n: the last position's alone.
@@ -199,6 +226,17 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
    * Each layer in a scope of its own, its output alone moved out: a handle held keeps MLX from freeing its buffer
    * once used — with every intermediate of a pass held, a 4096-token prompt peaked at 48.7 GB */
   def logits(ids: Arr, cache: Vector[KvCache], all: Boolean = false)(using s: Scope): Arr =
+    val h = forward(ids, cache, all)
+    val r = Scope(s)(embed(h))
+    s.release(h)
+    r
+
+  override def hiddenStates(ids: Arr, state: Model.State, all: Boolean)(using Scope): Arr =
+    forward(ids, state.asInstanceOf[State].caches, all)
+  override def head(h: Arr)(using Scope): Arr = embed(h)
+
+  /** the hidden states after the last norm, of the last of `ids` [1, n] or of each */
+  private def forward(ids: Arr, cache: Vector[KvCache], all: Boolean)(using s: Scope): Arr =
     val n = ids.dim(1)
     var h = Scope(s)(reshape(embed.rows(reshape(ids, n)), 1, n, hidden))
     var i = 0
@@ -216,8 +254,12 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       i += 1
     Scope(s) {
       val last = if n == 1 || all then h else slice(h, Seq(0, n - 1, 0), Seq(1, n, hidden))
-      embed(rmsNorm(last, norm, eps))
+      rmsNorm(last, norm, eps)
     }
+
+  /** every projection unpacked once (`QLinear.densify`): for the CPU, where quantized products are slow */
+  def densify(dtype: Dtype = Dtype.Float32): Unit =
+    (embed +: blocks.flatMap(l => Seq(l.q, l.k, l.v, l.o, l.gate, l.up, l.down))).foreach(_.densify(dtype, own))
 
   /** its weights freed, and MLX's buffers kept for reuse given back: the memory free for another model */
   def close(): Unit =

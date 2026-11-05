@@ -23,7 +23,10 @@ static mlx_stream stream_of(int gpu) {
   }
   return gpu ? gpu_stream : cpu_stream;
 }
-#define S stream_of(1)
+// a thread's ops on the CPU instead (okm_use_cpu): a small model beside a big one, the GPU left to it
+static __thread int on_cpu = 0;
+void okm_use_cpu(int yes) { on_cpu = yes; }
+#define S stream_of(!on_cpu)
 #define CPU stream_of(0)
 static __thread char err[1024];
 

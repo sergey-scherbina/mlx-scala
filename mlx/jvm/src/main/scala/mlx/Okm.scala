@@ -32,6 +32,7 @@ private[mlx] object Okm:
     s.address() + base
 
   private val hInit = fn("okm_init", I)
+  private val hUseCpu = fn("okm_use_cpu", null, I)
   private val hError = fn("okm_error", J)
   private val hFree = fn("okm_free", null, J)
   private val hRetain = fn("okm_retain", J, J)
@@ -127,6 +128,7 @@ private[mlx] object Okm:
     val p: Long = hError.invokeExact()
     MemorySegment.ofAddress(p).reinterpret(1024).getString(0)
   def free(a: Long): Unit = hFree.invokeExact(a)
+  def useCpu(yes: Boolean): Unit = hUseCpu.invokeExact(if yes then 1 else 0)
   def retain(a: Long): Long = hRetain.invokeExact(a)
   def ndim(a: Long): Int = hNdim.invokeExact(a)
   def dim(a: Long, i: Int): Int = hDim.invokeExact(a, i)

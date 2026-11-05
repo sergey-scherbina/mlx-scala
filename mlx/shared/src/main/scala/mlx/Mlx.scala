@@ -82,6 +82,12 @@ object Mlx:
   /** MLX ready: its error handler and the GPU stream — once */
   def init(): Unit = synchronized { if !started then { check(Okm.init()); started = true } }
 
+  /** `f` with this thread's ops on the CPU (MLX's CPU backend: Accelerate) — a small model beside a big one, the GPU
+   * left to it; the same arrays (memory is one), the same code */
+  def onCpu[A](f: => A): A =
+    Okm.useCpu(true)
+    try f finally Okm.useCpu(false)
+
   def ints(data: Array[Int], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromI32(data, shape.toArray))
   def floats(data: Array[Float], shape: Int*)(using s: Scope): Arr = s.own(Okm.fromF32(data, shape.toArray))
 

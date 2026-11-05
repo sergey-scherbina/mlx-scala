@@ -25,3 +25,7 @@ and after `<tool_call>` (`Session(anchors)`, `Chat.anchors`).
   continuations of training files, second draft in the loss): agreement is already 85.1% untrained, 86.4% trained
   (overfits after ~750 steps), decode 2.44 → 2.49 tokens a pass (+2%). The draft layer is near its ceiling on the
   model's own Scala; more tokens a pass need a deeper draft (several layers / EAGLE-style), not tuning this one.
+- **Code search, next** (2026-11-05, branch embeddings): more pairs (call site ↔ declaration, commit message ↔
+  changed member — symdex and git; now only doc comments, 597), the adapter trained on all projects for use; an
+  index per project (vectors cached by file hash, on the CPU in the background); then rozum's `rag.search` and
+  symdex's search on it (both lexical/semantic today — measure them on the same pairs first).

@@ -9,6 +9,7 @@ private object C:
   def okm_init(): CInt = extern
   def okm_error(): CString = extern
   def okm_free(a: Long): Unit = extern
+  def okm_use_cpu(yes: CInt): Unit = extern
   def okm_retain(a: Long): Long = extern
   def okm_ndim(a: Long): CInt = extern
   def okm_dim(a: Long, i: CInt): CInt = extern
@@ -118,6 +119,7 @@ private[mlx] object Okm:
   def init(): Int = C.okm_init()
   def error(): String = fromCString(C.okm_error())
   def free(a: Long): Unit = C.okm_free(a)
+  def useCpu(yes: Boolean): Unit = C.okm_use_cpu(if yes then 1 else 0)
   def retain(a: Long): Long = C.okm_retain(a)
   def ndim(a: Long): Int = C.okm_ndim(a)
   def dim(a: Long, i: Int): Int = C.okm_dim(a, i)
