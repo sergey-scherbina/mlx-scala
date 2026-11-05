@@ -69,11 +69,31 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
       model.training(false)
 
   /** one AdamW step on an example: its loss before the step */
-  def step(ids: Array[Int], from: Int): Float =
+  def step(ids: Array[Int], from: Int): Float = stepOn(loss(ids, from))
+
+  /** one AdamW step on any loss of the model with the adapters on (`f`: the adapters attached, its value a scalar —
+   * a draft layer's agreement with the model, say): the loss before the step */
+  def stepWith(f: Scope ?=> Arr): Float = stepOn { ps =>
+    attach(ps)
+    f
+  }
+
+  /** a loss of the model with the adapters as they are now (no step) */
+  def evaluateWith(f: Scope ?=> Arr): Float =
+    val s = new Scope
+    try
+      attach(params)
+      f(using s).itemFloat
+    finally
+      s.close()
+      model.lora = Map.empty
+      model.training(false)
+
+  private def stepOn(loss: Scope ?=> Seq[Arr] => Arr): Float =
     val s = new Scope
     given Scope = s
     try
-      val (value, grads) = valueAndGrad(params, params.indices)(loss(ids, from))
+      val (value, grads) = valueAndGrad(params, params.indices)(loss)
       t += 1
       val (b1, b2, eps) = (0.9f, 0.999f, 1e-8f)
       val c1 = 1f - math.pow(b1, t).toFloat

@@ -18,3 +18,10 @@ and after `<tool_call>` (`Session(anchors)`, `Chat.anchors`).
   turns drafts off on hot experts as it does guesses.
 - **Snapshots every 64 tokens of prefill** (FreeToken's ×64 track): less needed with our prefill speed; measure the
   re-prefill an agent's turn still pays first.
+- **MTP trained for Scala: tried 2026-11-04, not worth serving** (`MtpTrain`: LoRA on the draft layer, rank 16,
+  toward the model's own picks; `mtpTrainBench`, `mtpSelfBench`, Qwen3.5-4B). On human code (okay-* files, held-out
+  symdex + okay-datalog): first-draft agreement 66.8 → 72.0% in 1500 steps (prose 63.5 → 66.8, not lost) — but a
+  real decode moved 2.29 → 2.31 tokens a pass. On the model's OWN answers (the distribution a decode sees; 500
+  continuations of training files, second draft in the loss): agreement is already 85.1% untrained, 86.4% trained
+  (overfits after ~750 steps), decode 2.44 → 2.49 tokens a pass (+2%). The draft layer is near its ceiling on the
+  model's own Scala; more tokens a pass need a deeper draft (several layers / EAGLE-style), not tuning this one.
