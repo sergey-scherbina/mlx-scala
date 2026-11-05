@@ -29,3 +29,12 @@ and after `<tool_call>` (`Session(anchors)`, `Chat.anchors`).
   changed member — symdex and git; now only doc comments, 597), the adapter trained on all projects for use; an
   index per project (vectors cached by file hash, on the CPU in the background); then rozum's `rag.search` and
   symdex's search on it (both lexical/semantic today — measure them on the same pairs first).
+- **Code search: what the adapter did not learn** (2026-11-05): trained on doc comments' first lines (they share words
+  with names), held-out projects MRR 0.480 → 0.598 — but on rozum's own questions (okay-code.json: written WITHOUT
+  the definitions' names, 18 found among 2750 declarations of okay, `okayEval`) base 0.159, adapter 0.152: no gain,
+  a near-lexical match learned. Merged into the weights (`LoraMerge`): at 4 bits the gain is lost (0.495), at 8 kept
+  exactly (0.598) — rozum's gateway could load such a directory (`ROZUM_EMBED_MODEL` takes a path) — but not until
+  it helps there. Next: queries like an agent's — the 35B describing each member WITHOUT its name (and several
+  phrasings), trained on those; measured on okayEval and rozum's rag-eval in an ISOLATED copy (rozum keeps vectors
+  in `<root>/.rozum/rag-vectors.bin` told apart only by their width: another model of 1024 would mix into a real
+  index; and its CLI embeds the corpus through the shared gateway — another model than the query's).
