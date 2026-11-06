@@ -18,11 +18,13 @@ trait Adaptable extends Model:
   /** gradients wanted through the forward pass (a model whose fast path has none takes a slower one) */
   def training(on: Boolean): Unit = ()
 
+/** `except`: adapters NOT made, by name ("1.o", "9.down") — a projection removed from a model (its output silenced)
+ * must not grow a low-rank copy of itself under the adapter */
 final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("q", "v"), layers: Seq[Int] = Nil,
-    alpha: Float = 16f, lr: Float = 1e-4f, weightDecay: Float = 0f, seed: Long = 1):
+    alpha: Float = 16f, lr: Float = 1e-4f, weightDecay: Float = 0f, seed: Long = 1, except: Set[String] = Set.empty):
   private val keep = new Scope
   private val at = if layers.nonEmpty then layers else 0 until model.layerCount
-  val names: Vector[String] = (for i <- at; p <- projs if model.widths(i, p).isDefined yield s"$i.$p").toVector
+  val names: Vector[String] = (for i <- at; p <- projs if model.widths(i, p).isDefined && !except(s"$i.$p") yield s"$i.$p").toVector
   private val r = scala.util.Random(seed)
   // the parameters, A then B for each adapter; AdamW's moments
   private var params: Vector[Arr] = names.flatMap { n =>
