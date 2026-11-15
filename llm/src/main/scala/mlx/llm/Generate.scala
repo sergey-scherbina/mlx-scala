@@ -30,6 +30,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     cache: PrefixCache | Null = null, marks: Seq[Int] = Nil, sampling: Sampling = Sampling.Greedy,
     guesses: Int = 0, port: Port | Null = null, anchors: Set[Int] = Set.empty, drafts: Int = 0,
     batch: Batch | Null = null):
+  if batch != null then batch.nn.join(this)
   private var state: Model.State | Null = null
   private var cached = 0
   // the tokens made that the state was fed, in order (the prompt's before them)
@@ -51,12 +52,12 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   // (`last`), not yet fed to the model
   private val draftState: Model.Draft | Null =
     if drafts > 0 && !sampling.penalizes && port == null then model.newDraft() else null
-  private val drafting = draftState != null
+  private var drafting = draftState != null
   private var pendingH: Arr | Null = null
   private var pendingT: Arr | Null = null
   private var last = 0
   // guesses checked: the text so far, the tokens made and not yet given
-  private val checking = guesses > 0 && !sampling.penalizes && port == null && !drafting
+  private var checking = guesses > 0 && !sampling.penalizes && port == null && !drafting
   private val text = scala.collection.mutable.ArrayBuffer.from(prompt)
   private val ready = scala.collection.mutable.Queue.empty[Int]
   private var guessing = guesses
@@ -191,7 +192,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         val more = token +: chosen.getOrElse(Array.empty[Int])
         y = if made + more.length < maxTokens then step(Scope(carry)(ints(more, 1, more.length))) else null
         if y != null then fedMore(more)
-      else if batch != null then
+      else if batch != null && !checking then
         // BATCHED: a round gives a token to every session decoding plainly on this model, this one among them
         batch.nn.join(this)
         batch.nn.round()
@@ -348,6 +349,22 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   // A ROUND OF A BATCH (`Batch.round`): this session's part. A member decodes plainly (no port, no guesses, no
   // drafts: those are passes of one sequence), has a pick pending and is not yet due to end
   private var due = false
+  private[llm] def done: Boolean = finished
+  /** TURNED PLAIN for a batch (one-way): no more guesses, no more drafts. Guessing leaves a session plain after each
+   * step already (its pick pending, all before it fed); drafting leaves its chosen token (`last`) not yet fed — fed
+   * now by a step, the pick after it pending, the draft layer left (closed with the session) */
+  private[llm] def goPlain(): Unit =
+    if !finished && port == null then
+      checking = false
+      if drafting then
+        drafting = false
+        if started then
+          if pendingH != null then { carry.release(pendingH.nn); pendingH = null }
+          if pendingT != null then { carry.release(pendingT.nn); pendingT = null }
+          if made + ready.length < maxTokens then
+            y = step(Scope(carry)(ints(Array(last), 1, 1)))
+            fedMore(Array(last))
+          else due = true
   private[llm] def member: Boolean =
     port == null && !checking && !drafting && !finished && !due && y != null
   /** its pending pick [1, 1] — the input of the round's step — and the state it is fed to */
@@ -409,11 +426,15 @@ final class Batch(model: Model):
   var rounds = 0L
   var stepped = 0L
   def join(s: Session): Unit = sessions += s
+  /** every session on the model, from its start: with two or more alive, those still guessing or drafting turn
+   * plain and join the rounds */
   def leave(s: Session): Unit = sessions -= s
   def size: Int = sessions.size
 
   def round(): Unit =
-    val members = sessions.filter(_.member).toVector
+    val alive = sessions.filter(!_.done)
+    if alive.size > 1 then alive.foreach(_.goPlain())
+    val members = alive.filter(_.member).toVector
     val going = members.filter(_.wantsMore)
     val nexts: Map[Session, Arr] =
       if going.isEmpty then Map.empty

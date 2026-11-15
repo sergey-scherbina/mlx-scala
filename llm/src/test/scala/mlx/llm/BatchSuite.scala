@@ -95,3 +95,41 @@ class BatchSuite extends munit.FunSuite:
       // whole from one read but its last token — the noise above)
       agree.zip(alone).foreach((k, a) => assert(k >= math.min(8, a.length), s"parted at $k of ${a.length}"))
       model.close()
+
+/** A SESSION STARTED ALONE with guesses or its own drafts turns plain when a second starts, and joins the rounds:
+ * its tokens are its tokens alone (greedy; a bf16 near tie may part them late — reported), the rounds are two wide */
+class BatchJoinSuite extends munit.FunSuite:
+  override val munitTimeout = scala.concurrent.duration.Duration(30, "min")
+  for (repo, guesses, drafts) <- Seq(("mlx-community/Qwen3-0.6B-4bit", 6, 0),
+      ("mlx-community/Qwen3.6-35B-A3B-4bit", 0, 2)) do
+    test(s"$repo: alone with guesses $guesses / drafts $drafts, then batched"):
+      val dir = Models.snapshot(repo)
+      assume(dir.isDefined, s"$repo is not in the HuggingFace cache")
+      val chat = Chat.load(dir.get)
+      val model = Model.load(dir.get, mapped = true)
+      val first = chat.ask("Write a numbered list of ten facts about the Moon.", Map("enable_thinking" -> false))
+      val second = chat.ask("Write a numbered list of ten facts about Mars.", Map("enable_thinking" -> false))
+      val n = 80
+      def all(s: Session) = Iterator.continually(s.next()).takeWhile(_.isDefined).flatten.toVector
+      val aloneA = all(Session(model, first, n, chat.stops, guesses = guesses, drafts = drafts))
+      val aloneB = all(Session(model, second, n, chat.stops))
+      val batch = Batch(model)
+      val a = Session(model, first, n, chat.stops, guesses = guesses, drafts = drafts, batch = batch)
+      val got = Vector.newBuilder[Int]
+      // a alone for its first 20 tokens (its guesses or drafts working), then b starts: a turns plain
+      for _ <- 0 until 20 do a.next().foreach(got += _)
+      val b = Session(model, second, n, chat.stops, batch = batch)
+      val gotB = Vector.newBuilder[Int]
+      var open = Set("a", "b")
+      while open.nonEmpty do
+        if open("a") then a.next() match { case Some(t) => got += t; case None => open -= "a" }
+        if open("b") then b.next() match { case Some(t) => gotB += t; case None => open -= "b" }
+      val (ra, rb) = (got.result(), gotB.result())
+      val agreeA = aloneA.zip(ra).takeWhile(_ == _).length
+      val agreeB = aloneB.zip(rb).takeWhile(_ == _).length
+      println(f"$repo: a ${ra.length} tokens (alone ${aloneA.length}), the same prefix $agreeA; b ${rb.length} " +
+        f"(alone ${aloneB.length}), the same prefix $agreeB; ${batch.stepped.toDouble / batch.rounds}%.2f a round " +
+        f"over ${batch.rounds} rounds")
+      assert(agreeA >= 20 && agreeB >= math.min(8, aloneB.length))
+      assert(batch.rounds > 0 && batch.stepped.toDouble / batch.rounds > 1.5)
+      model.close()
