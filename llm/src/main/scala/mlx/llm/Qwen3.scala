@@ -221,6 +221,45 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       else Mlx.attention(q, keys, values, scale, causal = n > 1)
     adapted(i, "o", l.o, reshape(transpose(a, 0, 2, 1, 3), 1, n, config.heads * headDim))
 
+  /** A BATCHED DECODE STEP: one token of each of B sequences (x [1, B, H]); the projections and the MLP on the B rows
+   * at once, RoPE, the cache and the attention row by row */
+  override def stepMany(ids: Arr, states: Seq[Model.State])(using s: Scope): Arr =
+    if states.length == 1 || differentiable || hook != null then super.stepMany(ids, states)
+    else
+      val b = states.length
+      val caches = states.map(_.asInstanceOf[State].caches)
+      def row(t: Arr, r: Int)(using Scope) = slice(t, Seq(0, r, 0, 0), Seq(1, r + 1, t.dim(2), t.dim(3)))
+      var h = Scope(s)(reshape(embed.rows(reshape(ids, b)), 1, b, hidden))
+      var i = 0
+      while i < layers do
+        val l = blocks(i)
+        val x = h
+        h = Scope(s) {
+          val xn = rmsNorm(x, l.inNorm, eps)
+          val qAll = reshape(adapted(i, "q", l.q, xn), 1, b, config.heads, headDim)
+          val kAll = reshape(adapted(i, "k", l.k, xn), 1, b, kvHeads, headDim)
+          val vAll = reshape(adapted(i, "v", l.v, xn), 1, b, kvHeads, headDim)
+          val outs = caches.zipWithIndex.map { (c, r) =>
+            val cache = c(i)
+            val offset = cache.offset
+            val q = rope(transpose(rmsNorm(row(qAll, r), l.qNorm, eps), 0, 2, 1, 3), headDim, false, ropeTheta, 1f,
+              offset)
+            val k = rope(transpose(rmsNorm(row(kAll, r), l.kNorm, eps), 0, 2, 1, 3), headDim, false, ropeTheta, 1f,
+              offset)
+            val (keys, values) = cache.update(k, transpose(row(vAll, r), 0, 2, 1, 3))
+            reshape(transpose(Mlx.attention(q, keys, values, scale, causal = false), 0, 2, 1, 3), 1, 1,
+              config.heads * headDim)
+          }
+          val a = add(x, adapted(i, "o", l.o, concatenate(outs, 1)))
+          val m = rmsNorm(a, l.postNorm, eps)
+          add(a, adapted(i, "down", l.down, multiply(silu(adapted(i, "gate", l.gate, m)), adapted(i, "up", l.up, m))))
+        }
+        s.release(x)
+        i += 1
+      val out = Scope(s)(embed(rmsNorm(h, norm, eps)))
+      s.release(h)
+      out
+
   /** the next token's logits after `ids` [1, n], the cache moved on by n: the last position's alone.
    *
    * Each layer in a scope of its own, its output alone moved out: a handle held keeps MLX from freeing its buffer

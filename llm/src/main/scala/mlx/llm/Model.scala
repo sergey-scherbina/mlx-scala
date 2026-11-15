@@ -27,6 +27,12 @@ trait Model:
   /** the draft layer on hidden states `h` [1, n, H] (`hiddenStates`', or its own) and the token after each [1, n]: its
    * hidden states [1, n, H] — the logits of the token after those by `head` — the draft's state moved on by n */
   def draft(h: Arr, ids: Arr, d: Model.Draft)(using Scope): Arr = sys.error("no draft layer")
+  /** ONE TOKEN FOR EACH OF B SEQUENCES — a batched decode step: `ids` [1, B], row r fed to `states(r)`; the logits
+   * [1, B, V]. By default each row apart (right for any model); a model may run the work the rows share (the
+   * projections, the MLP, the experts: reading the weights) once for all — then the logits are close to the rows'
+   * apart, not bit-exact (a product over B rows is another kernel than over one) */
+  def stepMany(ids: Arr, states: Seq[Model.State])(using s: Scope): Arr =
+    Mlx.concatenate(states.indices.map(r => logits(Mlx.slice(ids, Seq(0, r), Seq(1, r + 1)), states(r))), 1)
   def close(): Unit
 
 object Model:

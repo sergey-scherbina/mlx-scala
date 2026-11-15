@@ -309,14 +309,84 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
     val beta = sigmoid(l.b(x))
     // g = exp(-exp(A_log) · softplus(a + dt_bias)), in float32
     val g = computeG(l.aLog, l.a(x), l.dtBias)
-    val past = if st.conv == null then zeros(Seq(1, convKernel - 1, convDim), x.dtype) else st.conv.nn
+    val y = linearCore(l, qkv, beta, g, st, n, x.dtype)
+    // the gated RMS norm: silu(z) · norm(y), in float32
+    val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
+    adapted(l.i, "out", l.out, reshape(gated, 1, n, valueDim))
+
+  // A BATCHED DECODE STEP (`stepMany`): x [1, B, H] is one token of each of B sequences. What reads weights runs on
+  // the B rows at once; what is a sequence's own — RoPE at its offset, its KV cache, its attention, its linear
+  // layer's convolution and state — row by row (n = 1)
+  private def row(t: Arr, r: Int)(using Scope): Arr = slice(t, Seq.fill(t.ndim)(0).updated(1, r),
+    t.shape.updated(0, 1).updated(1, r + 1))
+
+  private def attentionRows(l: Layer, x: Arr, cs: Seq[KvCache])(using Scope): Arr =
+    val b = cs.length
+    val qgAll = reshape(l.q(x), 1, b, heads, 2 * headDim)
+    val kAll = reshape(l.k(x), 1, b, kvHeads, headDim)
+    val vAll = reshape(l.v(x), 1, b, kvHeads, headDim)
+    val outs = cs.zipWithIndex.map { (cache, r) =>
+      val offset = cache.offset
+      val qg = row(qgAll, r)
+      val q = slice(qg, Seq(0, 0, 0, 0), Seq(1, 1, heads, headDim))
+      val gate = reshape(slice(qg, Seq(0, 0, 0, headDim), Seq(1, 1, heads, 2 * headDim)), 1, 1, heads * headDim)
+      val qs = rope(transpose(rmsNorm(q, l.qNorm, eps), 0, 2, 1, 3), ropeDims, false, ropeTheta, 1f, offset)
+      val ks = rope(transpose(rmsNorm(row(kAll, r), l.kNorm, eps), 0, 2, 1, 3), ropeDims, false, ropeTheta, 1f,
+        offset)
+      val (keys, values) = cache.update(ks, transpose(row(vAll, r), 0, 2, 1, 3))
+      val a = Mlx.attention(qs, keys, values, (1.0 / math.sqrt(headDim)).toFloat, causal = false)
+      multiply(reshape(transpose(a, 0, 2, 1, 3), 1, 1, heads * headDim), sigmoid(gate))
+    }
+    adapted(l.i, "o", l.o, concatenate(outs, 1))
+
+  private def linearRows(l: Layer, x: Arr, sts: Seq[LinearState])(using Scope): Arr =
+    val b = sts.length
+    val qkv = l.qkv(x)
+    val z = reshape(l.z(x), 1, b, linearValueHeads, linearValueDim)
+    val beta = sigmoid(l.b(x))
+    val g = computeG(l.aLog, l.a(x), l.dtBias)
+    val y = concatenate(sts.zipWithIndex.map((st, r) =>
+      linearCore(l, row(qkv, r), row(beta, r), row(g, r), st, 1, x.dtype)), 1)
+    val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
+    adapted(l.i, "out", l.out, reshape(gated, 1, b, valueDim))
+
+  override def stepMany(ids: Arr, states: Seq[Model.State])(using s: Scope): Arr =
+    if states.length == 1 || differentiable || hook != null then super.stepMany(ids, states)
+    else
+      val caches = states.map(_.asInstanceOf[State].caches)
+      val b = states.length
+      var h = Scope(s)(reshape(embed.rows(reshape(ids, b)), 1, b, hidden))
+      var i = 0
+      while i < layers do
+        val l = blocks(i)
+        val x = h
+        h = Scope(s) {
+          val normed = rmsNorm(x, l.inNorm, eps)
+          val r = caches.head(i) match
+            case _: KvCache => attentionRows(l, normed, caches.map(_(i).asInstanceOf[KvCache]))
+            case _: LinearState => linearRows(l, normed, caches.map(_(i).asInstanceOf[LinearState]))
+          val a = add(x, r)
+          add(a, mlp(l, rmsNorm(a, l.postNorm, eps), b))
+        }
+        s.release(x)
+        i += 1
+      val out = Scope(s)(lmHead(rmsNorm(h, norm, eps)))
+      s.release(h)
+      out
+
+  /** a linear layer's own part for ONE sequence: its projections given (qkv [1, n, conv], beta and g [1, n, Hv]),
+   * the convolution over its past and the gated delta rule from its state, both kept for the next step;
+   * y [1, n, Hv, Dv] */
+  private def linearCore(l: Layer, qkv: Arr, beta: Arr, g: Arr, st: LinearState, n: Int, dt: Dtype)(
+      using Scope): Arr =
+    val past = if st.conv == null then zeros(Seq(1, convKernel - 1, convDim), dt) else st.conv.nn
     val input = concatenate(Seq(past, qkv), 1)
     val keep = contiguous(slice(input, Seq(0, n, 0), Seq(1, n + convKernel - 1, convDim)))
     val conv = silu(conv1d(input, l.conv, groups = convDim))
     def part(from: Int, to: Int, h: Int, d: Int) = reshape(slice(conv, Seq(0, 0, from), Seq(1, n, to)), 1, n, h, d)
     // q and k L2-normalized, the readout scale folded into q; a scale is of the array's type (as Python's float is
     // to MLX: 128^-0.5 in bf16 is 0.0883789, not 0.0883883)
-    val (invSq, invOne) = scales(x.dtype)
+    val (invSq, invOne) = scales(dt)
     def scaled(t: Arr, c: Arr) = multiply(rmsNorm(t, Mlx.none, 1e-6f * inv * inv), c)
     val q = scaled(part(0, keyDim, linearKeyHeads, linearKeyDim), invSq)
     val k = scaled(part(keyDim, 2 * keyDim, linearKeyHeads, linearKeyDim), invOne)
@@ -339,19 +409,15 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
       // training: the delta rule step by step in ops, as mlx_lm's gated_delta_ops — the kernel has no gradient
       val (y, last) = deltaOps(q, k, v, g, beta, state, n)
       st.keep(keep, last)
-      val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
-      return adapted(l.i, "out", l.out, reshape(gated, 1, n, valueDim))
+      return y
     val outs = kernel(Seq(q, k, v, g, beta, state, int(n)), Seq(Seq(1, n, linearValueHeads, linearValueDim),
       stateShape) ++ (if steps then Seq(1 +: n +: stateShape.tail) else Nil),
-      Seq(x.dtype, Dtype.Float32) ++ (if steps then Seq(Dtype.Float32) else Nil),
-      grid, group, Seq("InT" -> x.dtype, "StT" -> Dtype.Float32, "Dk" -> linearKeyDim, "Dv" -> linearValueDim,
+      Seq(dt, Dtype.Float32) ++ (if steps then Seq(Dtype.Float32) else Nil),
+      grid, group, Seq("InT" -> dt, "StT" -> Dtype.Float32, "Dk" -> linearKeyDim, "Dv" -> linearValueDim,
       "Hk" -> linearKeyHeads, "Hv" -> linearValueHeads))
-    val y = outs(0)
     st.keep(keep, outs(1))
     if steps then st.record(outs(2), input, convKernel)
-    // the gated RMS norm: silu(z) · norm(y), in float32
-    val gated = preciseSwiglu(y, z, rmsNorm(y, l.gNorm, eps))
-    adapted(l.i, "out", l.out, reshape(gated, 1, n, valueDim))
+    outs(0)
 
   /** the gated delta rule by ops, a position at a time (mlx_lm's `_gated_delta_step_ops`): per value head h, the
    * state [Dv, Dk] decayed by g, corrected toward v along k by beta, read along q. q, k [1, n, Hk, Dk] (key heads

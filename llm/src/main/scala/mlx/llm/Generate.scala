@@ -28,7 +28,8 @@ final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, deco
  * next prompt parts right after it). A linear layer's state cannot be cut back: those are the places it is kept */
 final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int => Boolean,
     cache: PrefixCache | Null = null, marks: Seq[Int] = Nil, sampling: Sampling = Sampling.Greedy,
-    guesses: Int = 0, port: Port | Null = null, anchors: Set[Int] = Set.empty, drafts: Int = 0):
+    guesses: Int = 0, port: Port | Null = null, anchors: Set[Int] = Set.empty, drafts: Int = 0,
+    batch: Batch | Null = null):
   private var state: Model.State | Null = null
   private var cached = 0
   // the tokens made that the state was fed, in order (the prompt's before them)
@@ -67,8 +68,10 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   var taken = 0
   var passes = 0
 
-  private def step(input: Arr): Arr = Scope(carry) {
-    val logits = masked(model.logits(input, state.nn))
+  private def step(input: Arr): Arr = Scope(carry)(choose(masked(model.logits(input, state.nn))))
+
+  /** this session's next token from its logits [1, 1, V]: its sampling, its penalties (counted on the GPU) */
+  private def choose(logits: Arr)(using Scope): Arr =
     if !sampling.penalizes then sampling.pick(logits).evalAsync()
     else
       val v = logits.dim(-1)
@@ -82,7 +85,6 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
       token.evalAsync()
       now.evalAsync()
       token
-  }
 
   /** the logits with what the port does not allow at −∞ (as they are without a port, or when it allows any) */
   private def masked(logits: Arr)(using Scope): Arr =
@@ -189,6 +191,10 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
         val more = token +: chosen.getOrElse(Array.empty[Int])
         y = if made + more.length < maxTokens then step(Scope(carry)(ints(more, 1, more.length))) else null
         if y != null then fedMore(more)
+      else if batch != null then
+        // BATCHED: a round gives a token to every session decoding plainly on this model, this one among them
+        batch.nn.join(this)
+        batch.nn.round()
       else
         // the next step built and started BEFORE this one is read — as mlx_lm: the graph's building and encoding
         // overlap the GPU's running this one (read first, they did not: 13% of the decode's speed)
@@ -339,6 +345,28 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     Array.empty[Int]
   }
 
+  // A ROUND OF A BATCH (`Batch.round`): this session's part. A member decodes plainly (no port, no guesses, no
+  // drafts: those are passes of one sequence), has a pick pending and is not yet due to end
+  private var due = false
+  private[llm] def member: Boolean =
+    port == null && !checking && !drafting && !finished && !due && y != null
+  /** its pending pick [1, 1] — the input of the round's step — and the state it is fed to */
+  private[llm] def pending: Arr = y.nn
+  private[llm] def stateNow: Model.State = state.nn
+  /** whether the round should step it: its token after the pending one is wanted */
+  private[llm] def wantsMore: Boolean = made + ready.length + 1 < maxTokens
+  /** the round's new pick for it from its row of the logits [1, 1, V] */
+  private[llm] def pick(logits: Arr): Arr = Scope(carry)(choose(masked(logits)))
+  /** the pending pick read into the tokens ready, the new one (or none) pending — as the plain step does */
+  private[llm] def settle(next: Arr | Null): Unit =
+    val current = y.nn
+    val token = current.itemInt
+    y = next
+    carry.release(current)
+    ready += token
+    if next != null then fedMore(Array(token))
+    if next == null || stops(token) then due = true
+
   /** whether it ended at a stop token (else: at `maxTokens`) */
   def endedByStop: Boolean = stopped
   def timing: Timing =
@@ -346,6 +374,7 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
   def close(): Unit =
     if endAt == 0 then endAt = System.nanoTime()
     finished = true
+    if batch != null then batch.nn.leave(this)
     carry.close()
     if state != null then state.nn.close()
     if draftState != null then draftState.nn.close()
@@ -366,3 +395,38 @@ object Generate:
     val t = s.timing
     s.close()
     t
+
+/**
+ * A BATCH OF SESSIONS DECODING ON ONE MODEL: a round steps every member at once — the pending picks stacked
+ * [1, B], `Model.stepMany` (the weights read once for all), each member's own choice on its row (its sampling, mask,
+ * penalties), the new steps started, then the old picks read into each member's ready tokens: the same overlap of
+ * the GPU's work and the CPU's as one session's step. A session joins at its first plain step and leaves when closed;
+ * one alone steps as it would without a batch. All on the thread MLX runs on: no locks.
+ */
+final class Batch(model: Model):
+  private val sessions = scala.collection.mutable.LinkedHashSet.empty[Session]
+  /** rounds run, and the members stepped in them (their mean: the batch's width) */
+  var rounds = 0L
+  var stepped = 0L
+  def join(s: Session): Unit = sessions += s
+  def leave(s: Session): Unit = sessions -= s
+  def size: Int = sessions.size
+
+  def round(): Unit =
+    val members = sessions.filter(_.member).toVector
+    val going = members.filter(_.wantsMore)
+    val nexts: Map[Session, Arr] =
+      if going.isEmpty then Map.empty
+      else
+        val scope = new Scope
+        try
+          given Scope = scope
+          val ids = concatenate(going.map(s => reshape(s.pending, 1, 1)), 1)
+          val logits = model.stepMany(ids, going.map(_.stateNow))
+          val v = logits.dim(-1)
+          going.zipWithIndex.map((s, r) =>
+            s -> s.pick(slice(logits, Seq(0, r, 0), Seq(1, r + 1, v)))).toMap
+        finally scope.close()
+    rounds += 1
+    stepped += going.length
+    members.foreach(s => s.settle(nexts.getOrElse(s, null)))
