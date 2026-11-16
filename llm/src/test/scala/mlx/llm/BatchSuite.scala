@@ -133,3 +133,49 @@ class BatchJoinSuite extends munit.FunSuite:
       assert(agreeA >= 20 && agreeB >= math.min(8, aloneB.length))
       assert(batch.rounds > 0 && batch.stepped.toDouble / batch.rounds > 1.5)
       model.close()
+
+/** THE PROMPT IN CHUNKS (`prefillStep`): fed 61 tokens a call, the same greedy tokens as fed whole; and fed while
+ * another session decodes in the same batch — its chunks between the other's steps — both sessions still their own
+ * tokens (to the noise of a batched step) */
+class PrefillStepSuite extends munit.FunSuite:
+  override val munitTimeout = scala.concurrent.duration.Duration(10, "min")
+  test("Qwen3-0.6B: chunked prefill = whole; interleaved with another's decode"):
+    val dir = Models.snapshot("mlx-community/Qwen3-0.6B-4bit")
+    assume(dir.isDefined, "mlx-community/Qwen3-0.6B-4bit is not in the HuggingFace cache")
+    val chat = Chat.load(dir.get)
+    val model = Model.load(dir.get, mapped = true)
+    val long = chat.ask("Summarize in one sentence: " + (1 to 120).map(i => s"Fact $i: the number $i is ${
+      if i % 2 == 0 then "even" else "odd"}.").mkString(" "), Map("enable_thinking" -> false))
+    val short = chat.ask("Write a numbered list of ten facts about the Moon.", Map("enable_thinking" -> false))
+    assert(long.length > 600, long.length)
+    val n = 48
+    def all(s: Session) = Iterator.continually(s.next()).takeWhile(_.isDefined).flatten.toVector
+    val whole = all(Session(model, long, n, chat.stops))
+    val chunked = Session(model, long, n, chat.stops)
+    var calls = 0
+    while chunked.prefillStep(61) do calls += 1
+    assert(calls >= long.length / 61 - 1, calls)
+    assertEquals(all(chunked), whole)
+    // interleaved: a decodes; b's prompt fed a chunk between each of a's tokens
+    val aloneA = all(Session(model, short, n, chat.stops))
+    val batch = Batch(model)
+    val a = Session(model, short, n, chat.stops, batch = batch)
+    val b = Session(model, long, n, chat.stops, batch = batch)
+    val gotA = Vector.newBuilder[Int]
+    for _ <- 0 until 5 do a.next().foreach(gotA += _)
+    var steps = 0
+    while b.prefillStep(61) do
+      a.next().foreach(gotA += _)
+      steps += 1
+    assert(steps > 5, steps)
+    val gotB = Vector.newBuilder[Int]
+    var open = Set("a", "b")
+    while open.nonEmpty do
+      if open("a") then a.next() match { case Some(t) => gotA += t; case None => open -= "a" }
+      if open("b") then b.next() match { case Some(t) => gotB += t; case None => open -= "b" }
+    val (ra, rb) = (gotA.result(), gotB.result())
+    val agreeA = aloneA.zip(ra).takeWhile(_ == _).length
+    val agreeB = whole.zip(rb).takeWhile(_ == _).length
+    println(s"chunked prefill: $calls calls; interleaved: a agrees $agreeA of ${aloneA.length}, b $agreeB of ${whole.length}")
+    assert(agreeA >= 20 && agreeB >= 8, s"a $agreeA, b $agreeB")
+    model.close()

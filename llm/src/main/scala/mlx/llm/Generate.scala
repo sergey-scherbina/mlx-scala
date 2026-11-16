@@ -119,34 +119,47 @@ final class Session(model: Model, prompt: Array[Int], maxTokens: Int, stops: Int
     }
     scored.maxBy(_._2)._1
 
+  // THE PROMPT'S PLACE while it is fed (-1: not begun), and the marks ahead of it
+  private var at = -1
+  private var points: Seq[Int] = Nil
+
+  /** THE PROMPT, A CHUNK AT A TIME: one pass of at most `chunk` tokens; whether more is left to feed (all but the
+   * prompt's last token — the first step's, `next`'s). From the longest prefix a cache keeps, if any; the state
+   * evaluated after each chunk (memory bounded), a snapshot kept at each mark — as mlx_lm's generate_step, so without
+   * a cache the numbers are its numbers. `next` calls it until it is done; a server calls it task by task on its MLX
+   * thread, so the steps of other sessions run between the chunks of a long prompt instead of after all of them */
+  def prefillStep(chunk: Int = Session.chunk): Boolean =
+    if started || finished then false
+    else
+      if at < 0 then
+        sampling.seed.foreach(Mlx.randomSeed)
+        val reused = if cache == null then None else cache.nn.lookup(prompt)
+        state = reused.fold(model.newState())((_, snap) => model.restore(snap))
+        at = reused.fold(0)(_._1)
+        cached = at
+        points = marks.filter(m => m > at && m < prompt.length).sorted
+      if prompt.length - at > 1 then
+        val next = points.find(_ > at).getOrElse(Int.MaxValue)
+        val m = math.min(math.min(math.max(1, chunk), prompt.length - at - 1), next - at)
+        if !drafting then Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
+        else Scope(carry) {
+          // the draft layer fed too: each position's hidden state and the token after it
+          val h = model.hiddenStates(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn, all = true)
+          model.draft(h, Mlx.ints(prompt.slice(at + 1, at + m + 1), 1, m), draftState.nn).eval()
+        }
+        at += m
+        if at == next && cache != null then
+          cache.nn.add(prompt.take(at), state.nn.snapshot(), durable = marks.headOption.contains(at))
+      prompt.length - at > 1
+
   /** the next token, or none: the end of the turn (a stop token, not given), or `maxTokens` made */
   def next(): Option[Int] =
     if finished then None
     else if ready.nonEmpty then give(ready.dequeue())
     else
       if !started then
+        while prefillStep() do ()
         started = true
-        sampling.seed.foreach(Mlx.randomSeed)
-        // from the longest prefix a cache keeps, if any; then the prompt but its last token in chunks, the state
-        // evaluated after each (memory bounded), a snapshot kept at each mark; the last token the first step — as
-        // mlx_lm's generate_step, so without a cache the numbers are its numbers
-        val reused = if cache == null then None else cache.nn.lookup(prompt)
-        state = reused.fold(model.newState())((_, snap) => model.restore(snap))
-        var at = reused.fold(0)(_._1)
-        cached = at
-        val points = marks.filter(m => m > at && m < prompt.length).sorted
-        while prompt.length - at > 1 do
-          val next = points.find(_ > at).getOrElse(Int.MaxValue)
-          val m = math.min(math.min(Session.chunk, prompt.length - at - 1), next - at)
-          if !drafting then Scope(carry)(model.logits(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn).eval())
-          else Scope(carry) {
-            // the draft layer fed too: each position's hidden state and the token after it
-            val h = model.hiddenStates(Mlx.ints(prompt.slice(at, at + m), 1, m), state.nn, all = true)
-            model.draft(h, Mlx.ints(prompt.slice(at + 1, at + m + 1), 1, m), draftState.nn).eval()
-          }
-          at += m
-          if at == next && cache != null then
-            cache.nn.add(prompt.take(at), state.nn.snapshot(), durable = marks.headOption.contains(at))
         val input = Scope(carry)(Mlx.ints(prompt.drop(at), 1, prompt.length - at))
         if !drafting then y = step(input)
         else
