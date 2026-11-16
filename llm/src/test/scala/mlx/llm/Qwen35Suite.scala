@@ -18,6 +18,27 @@ class Qwen35Suite extends munit.FunSuite:
     test(s"Qwen3.6-35B-A3B, $slots hot experts a layer: mlx_lm's tokens")(
       check("mlx-community/Qwen3.6-35B-A3B-4bit", "qwen36-35b-greedy.json", slots))
 
+  // the hot experts changed IN PLACE, no reload, between generations: whole → 64 → 16 → whole, mlx_lm's tokens each time
+  test("Qwen3.6-35B-A3B, hot experts changed in place (reslot): mlx_lm's tokens at every count") {
+    val repo = "mlx-community/Qwen3.6-35B-A3B-4bit"
+    val dir = Models.snapshot(repo)
+    assume(dir.isDefined, s"$repo is not in the HuggingFace cache")
+    assume(!sys.env.contains("MLX_SKIP_BIG"), "MLX_SKIP_BIG")
+    val ref = Json.fromText(scala.io.Source.fromInputStream(getClass.getResourceAsStream("/qwen36-35b-greedy.json"),
+      "UTF-8").mkString)
+    val prompt = ref("prompt").list.map(_.int).toArray
+    val expected = ref("tokens").list.map(_.int)
+    val model = Model.load(dir.get, mapped = true, expertSlots = 64)
+    try
+      for slots <- Seq(64, 0, 16, 64) do
+        assert(model.reslot(slots), s"reslot $slots")
+        assertEquals(model.expertSlots, slots)
+        val out = Vector.newBuilder[Int]
+        Generate.greedy(model, prompt, expected.length, _ => false)(out += _)
+        assertEquals(out.result(), expected, s"$slots hot experts")
+    finally model.close()
+  }
+
   private def check(repo: String, file: String, slots: Int = 0): Unit =
     val dir = Models.snapshot(repo)
     assume(dir.isDefined, s"$repo is not in the HuggingFace cache")

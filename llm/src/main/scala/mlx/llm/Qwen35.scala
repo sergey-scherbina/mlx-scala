@@ -96,8 +96,32 @@ object LinearState:
  * gate and partial RoPE; its MLP dense, or a mixture of experts (top-k of many, and a shared expert) — over quantized
  * weights. As MLX's mlx_lm (qwen3_5.py, qwen3_next.py, gated_delta.py) computes it */
 final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr], own: Scope,
-    hotExperts: Map[String, ExpertCache]) extends Adaptable:
+    hotAtLoad: Map[String, ExpertCache], hotFor: Int => Map[String, ExpertCache])
+    extends Adaptable:
   import config.*
+  // THE HOT EXPERTS NOW: changed in place (`reslot`), between steps — the rest of the model, its prefixes and states
+  // untouched
+  @volatile private var hotExperts: Map[String, ExpertCache] = hotAtLoad
+
+  /** the hot experts a layer now; 0: all of them, mapped */
+  override def expertSlots: Int = hotExperts.values.headOption.map(_.slots).getOrElse(0)
+
+  /** HOT EXPERTS CHANGED IN PLACE: `slots` a layer (0: all of them, on the mapped file) — the old caches closed, their
+   * buffers given back, new ones made empty (filled by the next steps' misses). No reload: the weights stay mapped,
+   * the prefix cache and the states hold (the same model, the same numbers). The caller runs no step meanwhile.
+   * False when this model cannot (its weights not mapped: hot experts need the file) */
+  override def reslot(slots: Int): Boolean =
+    val want = if slots >= experts then 0 else slots
+    if want == expertSlots then true
+    else
+      val next = if want == 0 then Map.empty[String, ExpertCache] else hotFor(want)
+      if want > 0 && next.isEmpty then false
+      else
+        val old = hotExperts
+        hotExperts = next
+        old.values.foreach { c => c.close(); c.buffers.foreach(own.release) }
+        Mlx.clearCache()
+        true
   private val P = "language_model.model."
   private def w(name: String): Arr = weights.getOrElse(name, sys.error(s"no weight $name"))
   private def lin(prefix: String): QLinear =
@@ -106,19 +130,23 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
 
   /** a layer's experts: all of them, or a cache of the hot ones (`ExpertCache`: its buffers in their place) */
   private final class Experts(prefix: String):
-    val cache: ExpertCache | Null = hotExperts.get(prefix).orNull
+    // the cache now, and its slots in place: looked up each step (`reslot` may change it between steps)
+    private var seen: ExpertCache | Null = null
+    private var hotSeen: (Q, Q, Q) | Null = null
+    def cache: ExpertCache | Null =
+      val c = hotExperts.get(prefix).orNull
+      if c ne seen then
+        seen = c
+        hotSeen = if c == null then null else
+          def s(t: Q, at: Int): Q = (c.buffers(at), c.buffers(at + 1), c.buffers(at + 2), t._4, t._5)
+          (s(all._1, 0), s(all._2, 3), s(all._3, 6))
+      c
     private type Q = (Arr, Arr, Arr, Int, Int)
     private def q(n: String) =
       val p = s"$prefix.$n"
       val (gs, b) = quantized.getOrElse(p, (groupSize, bits))
       (w(s"$p.weight"), w(s"$p.scales"), w(s"$p.biases"), gs, b)
     private val all: (Q, Q, Q) = (q("gate_proj"), q("up_proj"), q("down_proj"))
-    // the cache's slots in their place: the same quantization, `slots` experts
-    private val hot: (Q, Q, Q) | Null =
-      if cache == null then null
-      else
-        def s(t: Q, at: Int): Q = (cache.buffers(at), cache.buffers(at + 1), cache.buffers(at + 2), t._4, t._5)
-        (s(all._1, 0), s(all._2, 3), s(all._3, 6))
     private def glu(x: Arr, idx: Arr, sorted: Boolean, on: (Q, Q, Q) = all)(using Scope) =
       def at(t: Q, v: Arr) = gatherQmm(v, t._1, t._2, t._3, idx, transpose = true, t._4, t._5, sorted)
       at(on._3, swiglu(at(on._1, x), at(on._2, x)))
@@ -128,6 +156,8 @@ final class Qwen35 private (val config: Qwen35Config, weights: Map[String, Arr],
      * read in, the picks mapped to their slots. A prompt's many on all of them (mapped: the GPU reads the file's
      * pages, the OS's cache — a prompt uses nearly every expert, too many to copy) */
     def run(x: Arr, idx: Arr, ahead: (Arr, ExpertCache) | Null = null)(using Scope): Arr =
+      val cache = this.cache
+      val hot = hotSeen
       val n = idx.dim(1)
       val k = idx.dim(2)
       if n * k < 64 then
@@ -751,17 +781,19 @@ object Qwen35:
     val keep = trunk ++ mtpWeights
     val config = base.copy(quantized = base.quantized ++ Mtp.overrides(mtpWeights.keys, base))
     evalAll(keep.values.toSeq)
-    val caches =
-      if !hot then Map.empty[String, ExpertCache]
+    // the caches of `n` hot experts a layer, made now or later (`reslot`): the experts' places in the files — a
+    // mixture of experts mapped alone (its pages the file's, the caches read from it)
+    def hotFor(n: Int): Map[String, ExpertCache] =
+      if !mapped || config.experts <= 0 || n <= 0 || n >= config.experts then Map.empty
       else
         val where = shards.flatMap(SafeTensors.locate(_, inPlace)).toMap
         (0 until config.layers).map { i =>
           val prefix = s"language_model.model.layers.$i.mlp.switch_mlp"
           val parts = for m <- Vector("gate_proj", "up_proj", "down_proj"); t <- Vector("weight", "scales", "biases")
             yield where(s"$prefix.$m.$t")
-          prefix -> ExpertCache(expertSlots, config.experts, parts, own)
+          prefix -> ExpertCache(n, config.experts, parts, own)
         }.toMap
-    new Qwen35(config, keep, own, caches)
+    new Qwen35(config, keep, own, if hot then hotFor(expertSlots) else Map.empty, hotFor)
 
   /** a decode on hot experts, all layers: (nanos reading misses, nanos waiting for reads ahead) */
   def expertTimes(m: Model): (Long, Long) = m match

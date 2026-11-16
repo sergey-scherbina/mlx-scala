@@ -33,6 +33,11 @@ trait Model:
    * apart, not bit-exact (a product over B rows is another kernel than over one) */
   def stepMany(ids: Arr, states: Seq[Model.State])(using s: Scope): Arr =
     Mlx.concatenate(states.indices.map(r => logits(Mlx.slice(ids, Seq(0, r), Seq(1, r + 1)), states(r))), 1)
+  /** a mixture of experts' hot experts a layer now (0: all of them, or not a mixture) */
+  def expertSlots: Int = 0
+  /** its hot experts changed in place, no step running (0: all of them): whether it could — the model, its prefixes
+   * and states unchanged otherwise (no reload) */
+  def reslot(slots: Int): Boolean = false
   def close(): Unit
 
 object Model:
