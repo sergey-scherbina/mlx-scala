@@ -29,7 +29,7 @@ final class Chat(val tokenizer: Tokenizer, val template: ChatTemplate, val stops
 
 object Chat:
   def load(dir: Path): Chat =
-    val tokenizer = Tokenizer.fromJson(Json.fromText(Files.readString(dir.resolve("tokenizer.json"))))
+    val tokenizer = Tokenizer.fromFile(dir.resolve("tokenizer.json"))
     val config = Json.fromText(Files.readString(dir.resolve("config.json")))
     val eos = config("eos_token_id") match
       case Json.Arr(ids) => ids.map(_.int).toSet

@@ -39,3 +39,39 @@ class TokenizerSuite extends munit.FunSuite:
     val ids = t.encode("emoji 🙂🚀 and 中文")
     val s = t.Stream()
     assertEquals(ids.map(s.push).mkString, "emoji 🙂🚀 and 中文")
+
+/** the tokenizer read without its JSON tree (`fromFile`) is the one read through it (`fromJson`): the same tables, the
+ * same ids — on every tokenizer in the HuggingFace cache that the models here use */
+class TokenizerFileSuite extends munit.FunSuite:
+  override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
+  private val texts = Seq("Hello, world!", "Числа: 12345, π≈3.14159 and émigré café", "emoji 🙂🚀 and 中文测试",
+    "<|im_start|>user\nhi<|im_end|>\n", "def f(x):\n    return x * 2\n", "\\u0041 \"quoted\" back\\slash\ttab")
+
+  for repo <- Seq("mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3.5-4B-MLX-4bit",
+      "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3-0.6B-4bit") do
+    test(s"$repo: fromFile = fromJson"):
+      val dir = Models.snapshot(repo)
+      assume(dir.isDefined, s"$repo is not in the HuggingFace cache")
+      val file = dir.get.resolve("tokenizer.json")
+      val a = Tokenizer.fromFile(file)
+      val b = Tokenizer.fromJson(Json.fromText(String(java.nio.file.Files.readAllBytes(file), "UTF-8")))
+      val (va, ra, pa, aa, sa, na) = a.tables
+      val (vb, rb, pb, ab, sb, nb) = b.tables
+      assertEquals(va, vb)
+      assertEquals(ra, rb)
+      assertEquals(pa, pb)
+      assertEquals(aa, ab)
+      assertEquals(sa, sb)
+      assertEquals(na, nb)
+      for t <- texts do assertEquals(a.encode(t).toVector, b.encode(t).toVector, t)
+
+  test("escapes, surrogate pairs and nesting, as JSON reads them"):
+    val text = """{"a": "x\"y\\zé🙂", "skip": {"n": [1, {"m": "]"}], "t": true}, "b": [["p", "q"], "r s"]}"""
+    val s = JsonScan(text.getBytes("UTF-8"))
+    var got = Vector.empty[String]
+    s.obj {
+      case "a" => got :+= s.str()
+      case "b" => s.arr(() => if s.peek == '[' then s.arr(() => got :+= s.str()) else got :+= s.str())
+      case _ => s.skip()
+    }
+    assertEquals(got, Vector("x\"y\\zé🙂", "p", "q", "r s"))

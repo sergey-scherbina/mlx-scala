@@ -24,6 +24,9 @@ final class Tokenizer private (
   private val cache = mutable.HashMap.empty[String, Array[Int]]
 
   def size: Int = pieces.length
+  /** its tables, for a test: equal for two readings of one file */
+  private[llm] def tables: (java.util.Map[String, Integer], java.util.Map[String, Integer], Seq[String], Map[String, Int],
+      Set[Int], Boolean) = (vocab, ranks, pieces.toSeq, added, special, nfc)
   def id(token: String): Int = added.getOrElse(token, Option(vocab.get(token)).map(_.toInt).getOrElse(-1))
   def isSpecial(id: Int): Boolean = special(id)
 
@@ -90,6 +93,43 @@ final class Tokenizer private (
       s
 
 object Tokenizer:
+  /** A TOKENIZER.JSON READ WITHOUT ITS JSON TREE: the vocabulary and the merges (Qwen's: 151k and 151k entries, a
+   * 20 MB file) scanned straight into their tables; the small parts (`added_tokens`, `normalizer`) parsed as JSON.
+   * The tree `fromJson` takes is hundreds of megabytes of objects for a moment — on Scala Native a heap that grows
+   * to it and never gives it back (okay-mlx's gateway held 1.1 GB with no model loaded). The same tokenizer */
+  def fromFile(path: java.nio.file.Path): Tokenizer =
+    val s = JsonScan(java.nio.file.Files.readAllBytes(path))
+    val vocab = java.util.HashMap[String, Integer]()
+    val ranks = java.util.HashMap[String, Integer]()
+    var top = 0
+    var addedJson: Json = Json.Arr(Vector.empty)
+    var normalizer: Json = Json.Null
+    var kind = ""
+    s.obj {
+      case "model" => s.obj {
+        case "type" => kind = s.str()
+        case "vocab" => s.obj { k => val v = s.int(); vocab.put(k, v); top = top max v }
+        case "merges" =>
+          var r = 0
+          s.arr { () =>
+            // a merge: "a b" (older files) or ["a", "b"] — the key "a b" either way
+            val key = if s.peek == '[' then
+              var k: String | Null = null
+              s.arr(() => { val p = s.str(); k = if k == null then p else k.nn + " " + p })
+              k.nn
+            else s.str()
+            ranks.put(key, r)
+            r += 1
+          }
+        case _ => s.skip()
+      }
+      case "added_tokens" => addedJson = Json.fromText(s.raw())
+      case "normalizer" => normalizer = Json.fromText(s.raw())
+      case _ => s.skip()
+    }
+    require(kind == "BPE", s"a BPE model expected: $kind")
+    build(vocab, ranks, top, addedJson, normalizer)
+
   def fromJson(json: Json): Tokenizer =
     val model = json("model")
     require(model("type").string == "BPE", s"a BPE model expected: ${model("type")}")
@@ -104,12 +144,16 @@ object Tokenizer:
         case Json.Arr(Vector(a, b)) => a.string + " " + b.string
         case s => s.string
       ranks.put(key, r)
-    val added = json("added_tokens").list.map(t => t("content").string -> t("id").int).toMap
-    val special = json("added_tokens").list.filter(_.field("special").exists(_.boolean)).map(_("id").int).toSet
+    build(vocab, ranks, top, json("added_tokens"), json("normalizer"))
+
+  private def build(vocab: java.util.HashMap[String, Integer], ranks: java.util.HashMap[String, Integer], top: Int,
+      addedTokens: Json, normalizer: Json): Tokenizer =
+    val added = addedTokens.list.map(t => t("content").string -> t("id").int).toMap
+    val special = addedTokens.list.filter(_.field("special").exists(_.boolean)).map(_("id").int).toSet
     val pieces = new Array[String]((top max added.values.max) + 1)
     vocab.forEach((k, v) => pieces(v) = k)
     for (k, v) <- added do pieces(v) = k
-    val nfc = json("normalizer") match
+    val nfc = normalizer match
       case Json.Null => false
       case n if n("type").string == "NFC" => true
       case n => sys.error(s"a normalizer not supported: $n")
