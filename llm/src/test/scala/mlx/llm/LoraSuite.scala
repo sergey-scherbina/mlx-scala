@@ -44,4 +44,12 @@ class LoraSuite extends munit.FunSuite:
     model.lora = Map.empty
     val diff = trained.indices.map(i => math.abs(trained(i) - loaded(i))).max
     assert(diff < 1e-3f, s"saved and attached: logits differ by $diff")
+    val continued = Lora(model, rank = 8, lr = 1e-3f)
+    continued.restoreParameters(file.toString)
+    assertEqualsFloat(continued.evaluate(ids, prompt.length), after, 1e-3f)
+    continued.attachTrained()
+    val restored = last()
+    assert(trained.indices.map(i => math.abs(trained(i) - restored(i))).max < 1e-3f)
+    assert(continued.step(ids, prompt.length).isFinite)
+    continued.close()
     model.close()

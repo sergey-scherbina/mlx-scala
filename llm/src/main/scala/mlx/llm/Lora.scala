@@ -137,6 +137,29 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
       saveSafetensors(path, tensors, Map("kind" -> "lora", "rank" -> rank.toString, "alpha" -> alpha.toString))
     finally s.close()
 
+  /** Warm-start from saved adapter parameters. AdamW moments and step count restart at zero.
+    * Validate the complete checkpoint before replacing anything; a rejected load keeps the old parameters.
+    */
+  def restoreParameters(path: String): Unit =
+    val s = new Scope
+    try
+      val tensors = loadSafetensors(path)(using s)
+      val keys = names.flatMap(n => Vector(s"$n.a", s"$n.b"))
+      require(tensors.keySet == (keys :+ "lora.scale").toSet, "adapter projections differ")
+      require(tensors("lora.scale").itemFloat == alpha / rank, "adapter scale differs")
+      keys.zip(params).foreach { (key, before) =>
+        require(tensors(key).shape == before.shape, s"adapter shape differs: $key")
+        require(tensors(key).toFloats.forall(_.isFinite), s"nonfinite adapter: $key")
+      }
+      val next = keys.map(k => tensors(k).moveTo(keep))
+      detach()
+      (params ++ m ++ v).foreach(keep.release)
+      params = next
+      m = params.map(p => zeros(p.shape, Dtype.Float32)(using keep))
+      v = params.map(p => zeros(p.shape, Dtype.Float32)(using keep))
+      t = 0
+    finally s.close()
+
   def close(): Unit =
     detach()
     keep.close()
