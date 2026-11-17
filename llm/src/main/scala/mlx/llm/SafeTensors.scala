@@ -90,7 +90,12 @@ object SafeTensors:
     if header(path).aligned then path
     else
       val real = path.toRealPath()
-      val copy = root.resolve(s"${real.getFileName}-${Files.size(real)}.safetensors")
+      // a blob's name is its content's hash; any other file (`model.safetensors` of two merged models, the same size)
+      // is named by its path and when it was written too — else one model's copy is read for another's
+      val name = real.getFileName.toString
+      val own = if name.matches("[0-9a-f]{40,}") then ""
+        else f"-${real.toString.hashCode}%08x-${Files.getLastModifiedTime(real).toMillis}"
+      val copy = root.resolve(s"$name-${Files.size(real)}$own.safetensors")
       if !Files.exists(copy) then
         Files.createDirectories(root)
         System.err.println(s"[Info] $path: its tensors sit unaligned — an aligned copy, once, at $copy")

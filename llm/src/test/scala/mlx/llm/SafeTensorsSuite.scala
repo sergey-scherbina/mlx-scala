@@ -32,6 +32,31 @@ class SafeTensorsSuite extends munit.FunSuite:
       assertEquals(sum(reshape(multiply(diff, diff), -1), 0).eval().itemFloat, 0f)
     s.close()
 
+  test("two models' files of one name and one size: two aligned copies, each its own values"):
+    val dir = Files.createTempDirectory("safetensors")
+    given s: Scope = new Scope
+    def written(at: java.nio.file.Path, from: Int) =
+      val a = astype(ints(Array.range(from, from + 1000), 10, 100), Dtype.UInt32)
+      var key = "weight"
+      Files.createDirectories(at)
+      val file = at.resolve("model.safetensors")
+      while { saveSafetensors(file.toString, Seq(key -> a)); SafeTensors.header(file).aligned } do
+        key = key + "x"
+        Files.delete(file)
+      (file, key)
+    val (one, k1) = written(dir.resolve("one"), 0)
+    val (two, k2) = written(dir.resolve("two"), 5000)
+    assertEquals(k1, k2)
+    assertEquals(Files.size(one), Files.size(two))
+    val root = dir.resolve("aligned")
+    val (c1, c2) = (SafeTensors.alignedOf(one, root), SafeTensors.alignedOf(two, root))
+    assertNotEquals(c1, c2)
+    assertEquals(SafeTensors.map(c2)(k2).eval().shape, Seq(10, 100))
+    val diff = subtract(astype(SafeTensors.map(c2)(k2), Dtype.Float32), astype(loadSafetensors(two.toString)(k2),
+      Dtype.Float32))
+    assertEquals(sum(reshape(multiply(diff, diff), -1), 0).eval().itemFloat, 0f)
+    s.close()
+
   test("an unaligned file aligned in place, through its link: the values as read"):
     val dir = Files.createTempDirectory("safetensors")
     given s: Scope = new Scope
