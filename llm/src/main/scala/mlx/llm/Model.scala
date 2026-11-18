@@ -21,6 +21,9 @@ trait Model:
   def hiddenStates(ids: Arr, state: Model.State, all: Boolean)(using Scope): Arr = sys.error("no hidden states")
   /** the logits of hidden states [1, n, H]: [1, n, V] */
   def head(h: Arr)(using Scope): Arr = sys.error("no hidden states")
+  /** for training, B sequences at once (`ids` [B, n], padded on the right), no state: [B, n, H] after the last
+   * norm, a gradient through every op */
+  def hiddenBatch(ids: Arr)(using Scope): Arr = sys.error("no batched training pass")
   /** a state for the model's draft layer (multi-token prediction: the next token's next guessed), or null: it has
    * none */
   def newDraft(): Model.Draft | Null = null

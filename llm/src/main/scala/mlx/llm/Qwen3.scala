@@ -296,6 +296,42 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       rmsNorm(last, norm, eps)
     }
 
+  /** A BATCH FOR TRAINING: the hidden states after the last norm of B sequences at once (`ids` [B, n], each padded
+   * on the right to n: with the future masked, a sequence's rows never see its padding), no cache, attention by ops
+   * (a gradient through it) under one causal mask for all layers and rows — [B, n, hidden]. `Lora.stepBatch`'s pass:
+   * the projections, the MLP and the adapters on B·n rows at once instead of B passes */
+  override def hiddenBatch(ids: Arr)(using s: Scope): Arr =
+    val (b, n) = (ids.dim(0), ids.dim(1))
+    val rep = config.heads / kvHeads
+    // the causal mask once: a query row (its group's rep heads stacked: row % n is its position) sees keys up to it
+    val mask = Scope(s)(floats(Array.tabulate(rep * n * n) { k =>
+      val (row, j) = (k / n, k % n)
+      if j <= row % n then 0f else -1e9f
+    }, rep * n, n))
+    var h = Scope(s)(reshape(embed.rows(reshape(ids, b * n)), b, n, hidden))
+    var i = 0
+    while i < layers do
+      val l = blocks(i)
+      val x = h
+      h = Scope(s) {
+        val xn = rmsNorm(x, l.inNorm, eps)
+        val q = rope(transpose(rmsNorm(reshape(adapted(i, "q", l.q, xn), b, n, config.heads, headDim), l.qNorm, eps),
+          0, 2, 1, 3), headDim, false, ropeTheta, 1f, 0)
+        val k = rope(transpose(rmsNorm(reshape(adapted(i, "k", l.k, xn), b, n, kvHeads, headDim), l.kNorm, eps),
+          0, 2, 1, 3), headDim, false, ropeTheta, 1f, 0)
+        val v = transpose(reshape(adapted(i, "v", l.v, xn), b, n, kvHeads, headDim), 0, 2, 1, 3)
+        val qg = reshape(q, b, kvHeads, rep * n, headDim)
+        val sc = astype(multiply(matmul(qg, transpose(k, 0, 1, 3, 2)), astype(scalar(scale), q.dtype)), Dtype.Float32)
+        val p = astype(softmax(add(sc, mask), -1), q.dtype)
+        val att = reshape(matmul(p, v), b, config.heads, n, headDim)
+        val a = add(x, adapted(i, "o", l.o, reshape(transpose(att, 0, 2, 1, 3), b, n, config.heads * headDim)))
+        val m = rmsNorm(a, l.postNorm, eps)
+        add(a, adapted(i, "down", l.down, multiply(silu(adapted(i, "gate", l.gate, m)), adapted(i, "up", l.up, m))))
+      }
+      s.release(x)
+      i += 1
+    Scope(s)(rmsNorm(h, norm, eps))
+
   /** every projection unpacked once (`QLinear.densify`): for the CPU, where quantized products are slow */
   def densify(dtype: Dtype = Dtype.Float32): Unit =
     (embed +: blocks.flatMap(l => Seq(l.q, l.k, l.v, l.o, l.gate, l.up, l.down))).foreach(_.densify(dtype, own))

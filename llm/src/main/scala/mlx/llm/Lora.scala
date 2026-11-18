@@ -59,6 +59,41 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
       divide(sum(ce, 0), scalar((n - from).toFloat))
     finally st.close()
 
+  /** THE MEAN OF B EXAMPLES' LOSSES IN ONE PASS (`Model.hiddenBatch`): each its own mean cross-entropy from its own
+   * `from` on, as `loss` gives it alone; the examples padded on the right to the longest, the head run on the
+   * answers' rows alone (B·n rows of a 151k vocabulary would not fit) */
+  private def lossBatch(examples: Seq[(Array[Int], Int)])(ps: Seq[Arr])(using Scope): Arr =
+    attach(ps)
+    val b = examples.size
+    val n = examples.map(_._1.length).max
+    val padded = examples.flatMap((ids, _) => ids ++ Array.fill(n - ids.length)(0)).toArray
+    val h = model.hiddenBatch(ints(padded, b, n))
+    val hidden = h.dim(2)
+    // the rows that predict an answer token (row j predicts token j + 1), the tokens, each example's weight
+    val rows = examples.zipWithIndex.flatMap { case ((ids, from), e) => (from - 1 until ids.length - 1).map(e * n + _) }
+    val targets = examples.flatMap((ids, from) => ids.drop(from))
+    val weights = examples.flatMap((ids, from) => Seq.fill(ids.length - from)(1f / ((ids.length - from) * b)))
+    val m = rows.size
+    val at = take(reshape(h, b * n, hidden), ints(rows.toArray, m), 0)
+    val logits = astype(model.head(reshape(at, 1, m, hidden)), Dtype.Float32)
+    val pred = reshape(logits, m, logits.dim(-1))
+    val ce = subtract(logsumexp(pred, 1), reshape(takeAlong(pred, ints(targets.toArray, m, 1), 1), m))
+    sum(multiply(ce, floats(weights.toArray, m)), 0)
+
+  /** one AdamW step on B examples at once: the mean of their losses before the step (`lossBatch`) */
+  def stepBatch(examples: Seq[(Array[Int], Int)]): Float = stepOn(lossBatch(examples))
+
+  /** the batch's loss as the adapters are now (no step) — the law: the mean of `evaluate` over its examples */
+  def evaluateBatch(examples: Seq[(Array[Int], Int)]): Float =
+    val s = new Scope
+    try
+      attach(params)
+      lossBatch(examples)(params)(using s).itemFloat
+    finally
+      s.close()
+      model.lora = Map.empty
+      model.training(false)
+
   /** the loss of an example as the adapters are now (no step) */
   def evaluate(ids: Array[Int], from: Int): Float =
     val s = new Scope
