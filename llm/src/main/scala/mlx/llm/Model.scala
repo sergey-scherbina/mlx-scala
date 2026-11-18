@@ -24,6 +24,9 @@ trait Model:
   /** for training, B sequences at once (`ids` [B, n], padded on the right), no state: [B, n, H] after the last
    * norm, a gradient through every op */
   def hiddenBatch(ids: Arr)(using Scope): Arr = sys.error("no batched training pass")
+  /** for training, a trie of tokens (`parent(j) < j`, −1 at a root) in one pass, each token attending to its
+   * ancestors, its position its depth: [1, n, H] — examples sharing a prefix run it once */
+  def hiddenTree(ids: Array[Int], parent: Array[Int])(using Scope): Arr = sys.error("no tree training pass")
   /** a state for the model's draft layer (multi-token prediction: the next token's next guessed), or null: it has
    * none */
   def newDraft(): Model.Draft | Null = null

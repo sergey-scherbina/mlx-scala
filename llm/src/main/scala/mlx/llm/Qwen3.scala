@@ -332,6 +332,58 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
       i += 1
     Scope(s)(rmsNorm(h, norm, eps))
 
+  /** A TREE FOR TRAINING: the hidden states of a trie's tokens (`ids`, `parent(j) < j`, −1 at a root) in one pass —
+   * each token attends to its ancestors and itself, its position its depth. Examples that share a prefix (the
+   * frame's rule, a table's description) run it once: `Lora.stepTree`'s pass. RoPE by tables of the depths (the
+   * fused rope takes one offset), the halves rotated as MLX's non-traditional rope does — [1, n, hidden] */
+  override def hiddenTree(ids: Array[Int], parent: Array[Int])(using s: Scope): Arr =
+    val n = ids.length
+    val depth = new Array[Int](n)
+    for j <- 0 until n do
+      require(parent(j) < j, s"a parent comes before its child: $j ← ${parent(j)}")
+      depth(j) = if parent(j) < 0 then 0 else depth(parent(j)) + 1
+    val rep = config.heads / kvHeads
+    // the mask: a row its ancestors and itself; rep rows a position (a key head's group stacked: row % n)
+    val one = Array.fill(n * n)(-1e9f)
+    for j <- 0 until n do
+      var a = j
+      while a >= 0 do { one(j * n + a) = 0f; a = parent(a) }
+    val mask = Scope(s)(floats(Array.tabulate(rep * n * n)(k => one(k % (n * n))), rep * n, n))
+    val half = headDim / 2
+    val angle = Array.tabulate(n * half)(k => depth(k / half) * math.pow(ropeTheta, -2.0 * (k % half) / headDim))
+    val cos = Scope(s)(floats(angle.map(a => math.cos(a).toFloat), n, half))
+    val sin = Scope(s)(floats(angle.map(a => math.sin(a).toFloat), n, half))
+    // (in float32, as the fused rope computes, then back to the input's type)
+    def rotate(x0: Arr, heads: Int)(using Scope): Arr =   // x [1, heads, n, headDim]
+      val x = astype(x0, Dtype.Float32)
+      val x1 = slice(x, Seq(0, 0, 0, 0), Seq(1, heads, n, half))
+      val x2 = slice(x, Seq(0, 0, 0, half), Seq(1, heads, n, headDim))
+      astype(concatenate(Seq(subtract(multiply(x1, cos), multiply(x2, sin)), add(multiply(x2, cos),
+        multiply(x1, sin))), 3), x0.dtype)
+    var h = Scope(s)(reshape(embed.rows(ints(ids, n)), 1, n, hidden))
+    var i = 0
+    while i < layers do
+      val l = blocks(i)
+      val x = h
+      h = Scope(s) {
+        val xn = rmsNorm(x, l.inNorm, eps)
+        val q = rotate(transpose(rmsNorm(reshape(adapted(i, "q", l.q, xn), 1, n, config.heads, headDim), l.qNorm, eps),
+          0, 2, 1, 3), config.heads)
+        val k = rotate(transpose(rmsNorm(reshape(adapted(i, "k", l.k, xn), 1, n, kvHeads, headDim), l.kNorm, eps),
+          0, 2, 1, 3), kvHeads)
+        val v = transpose(reshape(adapted(i, "v", l.v, xn), 1, n, kvHeads, headDim), 0, 2, 1, 3)
+        val qg = reshape(q, 1, kvHeads, rep * n, headDim)
+        val sc = astype(multiply(matmul(qg, transpose(k, 0, 1, 3, 2)), astype(scalar(scale), q.dtype)), Dtype.Float32)
+        val p = astype(softmax(add(sc, mask), -1), q.dtype)
+        val att = reshape(matmul(p, v), 1, config.heads, n, headDim)
+        val a = add(x, adapted(i, "o", l.o, reshape(transpose(att, 0, 2, 1, 3), 1, n, config.heads * headDim)))
+        val m = rmsNorm(a, l.postNorm, eps)
+        add(a, adapted(i, "down", l.down, multiply(silu(adapted(i, "gate", l.gate, m)), adapted(i, "up", l.up, m))))
+      }
+      s.release(x)
+      i += 1
+    Scope(s)(rmsNorm(h, norm, eps))
+
   /** every projection unpacked once (`QLinear.densify`): for the CPU, where quantized products are slow */
   def densify(dtype: Dtype = Dtype.Float32): Unit =
     (embed +: blocks.flatMap(l => Seq(l.q, l.k, l.v, l.o, l.gate, l.up, l.down))).foreach(_.densify(dtype, own))

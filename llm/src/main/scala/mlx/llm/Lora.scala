@@ -80,6 +80,48 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
     val ce = subtract(logsumexp(pred, 1), reshape(takeAlong(pred, ints(targets.toArray, m, 1), 1), m))
     sum(multiply(ce, floats(weights.toArray, m)), 0)
 
+  /** THE MEAN OF B EXAMPLES' LOSSES OVER THEIR TRIE (`Model.hiddenTree`): a prefix they share — a rule, a table — is
+   * one path of the trie, run once; each example's answer tokens predicted from its own path */
+  private def lossTree(examples: Seq[(Array[Int], Int)])(ps: Seq[Arr])(using Scope): Arr =
+    attach(ps)
+    val b = examples.size
+    val ids = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val parent = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val child = scala.collection.mutable.HashMap.empty[(Int, Int), Int]
+    // each example's path: its tokens' nodes
+    val paths = examples.map { (tokens, _) =>
+      var at = -1
+      tokens.map { t =>
+        at = child.getOrElseUpdate((at, t), { ids += t; parent += at; ids.size - 1 })
+        at
+      }
+    }
+    val h = model.hiddenTree(ids.toArray, parent.toArray)
+    val hidden = h.dim(2)
+    val rows = examples.zip(paths).flatMap { case ((tokens, from), path) => (from - 1 until tokens.length - 1).map(path) }
+    val targets = examples.flatMap((tokens, from) => tokens.drop(from))
+    val weights = examples.flatMap((tokens, from) => Seq.fill(tokens.length - from)(1f / ((tokens.length - from) * b)))
+    val m = rows.size
+    val at = take(reshape(h, ids.size, hidden), ints(rows.toArray, m), 0)
+    val logits = astype(model.head(reshape(at, 1, m, hidden)), Dtype.Float32)
+    val pred = reshape(logits, m, logits.dim(-1))
+    val ce = subtract(logsumexp(pred, 1), reshape(takeAlong(pred, ints(targets.toArray, m, 1), 1), m))
+    sum(multiply(ce, floats(weights.toArray, m)), 0)
+
+  /** one AdamW step on B examples over their trie: the mean of their losses before the step (`lossTree`) */
+  def stepTree(examples: Seq[(Array[Int], Int)]): Float = stepOn(lossTree(examples))
+
+  /** the trie's loss as the adapters are now (no step) — the law: the mean of `evaluate` over its examples */
+  def evaluateTree(examples: Seq[(Array[Int], Int)]): Float =
+    val s = new Scope
+    try
+      attach(params)
+      lossTree(examples)(params)(using s).itemFloat
+    finally
+      s.close()
+      model.lora = Map.empty
+      model.training(false)
+
   /** one AdamW step on B examples at once: the mean of their losses before the step (`lossBatch`) */
   def stepBatch(examples: Seq[(Array[Int], Int)]): Float = stepOn(lossBatch(examples))
 

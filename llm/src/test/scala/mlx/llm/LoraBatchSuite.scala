@@ -26,6 +26,10 @@ class LoraBatchSuite extends munit.FunSuite:
     val batch = lora.evaluateBatch(examples)
     println(f"each: ${one.map(x => f"$x%.4f").mkString(" ")}; mean ${one.sum / one.size}%.4f; batch $batch%.4f")
     assertEqualsDouble(batch.toDouble, one.sum / one.size.toDouble, 0.02 * math.max(1.0, one.sum / one.size))
+    // THE TRIE: the same law — and the short examples share the chat template's beginning
+    val tree = lora.evaluateTree(examples)
+    println(f"tree $tree%.4f")
+    assertEqualsDouble(tree.toDouble, one.sum / one.size.toDouble, 0.02 * math.max(1.0, one.sum / one.size))
     // the time: 8 examples, one at a time against one batch
     val eight = Vector.fill(2)(examples).flatten
     def secs(f: => Unit) = { val t = System.nanoTime; f; (System.nanoTime - t) / 1e9 }
@@ -34,5 +38,27 @@ class LoraBatchSuite extends munit.FunSuite:
     val single = secs(eight.foreach((ids, from) => lora.step(ids, from)))
     val batched = secs(lora.stepBatch(eight))
     println(f"8 examples: one at a time $single%.2f s, one batch $batched%.2f s")
+    // LONG ONES (a frame's prompt: ~450 tokens, the answer ~30), alternated three times: the same load on the GPU
+    val table = (1 to 40).map(i => s"order $i, city ${Seq("Kyiv", "Lviv", "Odesa")(i % 3)}, amount ${i * 7}")
+      .mkString("; ")
+    val long = Vector.tabulate(8)(k => example(s"$table. Question $k: total amount by city?",
+      "answer: sum amount\ngroup: city\nend"))
+    // as the frames' data is: three tables, a few questions each (the rule and a table shared)
+    def tableOf(t: Int) = (1 to 30).map(i => s"row $i, ${Seq("Kyiv", "Lviv", "Odesa")((i + t) % 3)}, ${i * (t + 3)}")
+      .mkString("; ")
+    val mixed = Vector.tabulate(8)(k => example(s"${tableOf(k % 3)}. Question $k: total by city?",
+      "answer: sum amount\ngroup: city\nend"))
+    println(s"long: ${long.map(_._1.length).mkString(" ")} tokens; mixed ${mixed.map(_._1.length).mkString(" ")}")
+    for (name, set) <- Seq("same table" -> long, "three tables" -> mixed) do
+      lora.stepTree(set); lora.stepBatch(set)
+      val times = (1 to 3).map(_ => (secs(set.foreach((ids, from) => lora.step(ids, from))),
+        secs(lora.stepBatch(set)), secs(lora.stepTree(set))))
+      println(f"$name, 8: one at a time ${times.map(_._1).min}%.2f s, a batch ${times.map(_._2).min}%.2f s, " +
+        f"a trie ${times.map(_._3).min}%.2f s")
+      // the forward alone: where a step's time goes
+      val ahead = (1 to 3).map(_ => (secs(set.foreach((ids, from) => lora.evaluate(ids, from))),
+        secs(lora.evaluateBatch(set)), secs(lora.evaluateTree(set))))
+      println(f"$name, 8, forward: one at a time ${ahead.map(_._1).min}%.2f s, a batch ${ahead.map(_._2).min}%.2f s, " +
+        f"a trie ${ahead.map(_._3).min}%.2f s")
     lora.close()
     model.close()
