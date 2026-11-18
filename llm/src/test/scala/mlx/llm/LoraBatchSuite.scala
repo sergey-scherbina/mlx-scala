@@ -30,6 +30,23 @@ class LoraBatchSuite extends munit.FunSuite:
     val tree = lora.evaluateTree(examples)
     println(f"tree $tree%.4f")
     assertEqualsDouble(tree.toDouble, one.sum / one.size.toDouble, 0.02 * math.max(1.0, one.sum / one.size))
+    // THE CHOICES: an option's score the sum of its tokens' log-probabilities after the context (each from `evaluate`,
+    // a mean over its tokens), the loss −log softmax at the meant one, averaged over the choices
+    val tok = chat.tokenizer
+    val ctx = chat.ask("How many orders are unpaid?", Map("enable_thinking" -> false))
+    val opts = Vector("answer: count\n", "answer: rows\n", "answer: sum amount\n").map(o => tok.encode(o))
+    val ctx2 = ctx ++ tok.encode("answer: count\n")
+    val opts2 = Vector("where: status = unpaid\n", "where: status = paid\n", "end").map(o => tok.encode(o))
+    val choices = Vector(Lora.Choice(ctx, opts, 1), Lora.Choice(ctx2, opts2, 2))   // the unlikely ones: a loss of nats
+    def scoreOf(c: Array[Int], o: Array[Int]) = -lora.evaluate(c ++ o, c.length).toDouble * o.length
+    def nll(c: Lora.Choice) =
+      val s = c.options.map(o => scoreOf(c.context, o))
+      val mx = s.max
+      mx + math.log(s.map(x => math.exp(x - mx)).sum) - s(c.meant)
+    val want = choices.map(nll).sum / choices.size
+    val got = lora.evaluateChoices(choices)
+    println(f"choices: by single passes $want%.4f, over the trie $got%.4f")
+    assertEqualsDouble(got.toDouble, want, 0.02 * math.max(1.0, want))
     // the time: 8 examples, one at a time against one batch
     val eight = Vector.fill(2)(examples).flatten
     def secs(f: => Unit) = { val t = System.nanoTime; f; (System.nanoTime - t) / 1e9 }

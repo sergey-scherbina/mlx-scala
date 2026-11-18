@@ -108,6 +108,69 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
     val ce = subtract(logsumexp(pred, 1), reshape(takeAlong(pred, ints(targets.toArray, m, 1), 1), m))
     sum(multiply(ce, floats(weights.toArray, m)), 0)
 
+  import Lora.Choice
+
+  /** THE LISTWISE LOSS OVER A TRIE (okay-inlay concept.md §5 role 2): every choice's context and options are paths
+   * of one trie (`Model.hiddenTree`: a prompt and the lines decided run once); an option's score is the sum of its
+   * tokens' log-probabilities; the loss the mean over choices of −log softmax(scores)[meant] */
+  private def lossChoices(choices: Seq[Choice])(ps: Seq[Arr])(using Scope): Arr =
+    attach(ps)
+    val ids = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val parent = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val child = scala.collection.mutable.HashMap.empty[(Int, Int), Int]
+    def walk(from: Int, tokens: Array[Int]): Array[Int] =
+      var at = from
+      tokens.map { t =>
+        at = child.getOrElseUpdate((at, t), { ids += t; parent += at; ids.size - 1 })
+        at
+      }
+    // each option's rows (the node before each of its tokens) and tokens
+    val rows = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val targets = scala.collection.mutable.ArrayBuffer.empty[Int]
+    val spans = choices.map { c =>
+      val ctx = walk(-1, c.context)
+      c.options.map { o =>
+        val nodes = walk(ctx.last, o)
+        val start = rows.size
+        rows ++= (ctx.last +: nodes.init); targets ++= o
+        (start, rows.size)
+      }
+    }
+    val h = model.hiddenTree(ids.toArray, parent.toArray)
+    val hidden = h.dim(2)
+    val m = rows.size
+    val at = take(reshape(h, ids.size, hidden), ints(rows.toArray, m), 0)
+    val logits = astype(model.head(reshape(at, 1, m, hidden)), Dtype.Float32)
+    val pred = reshape(logits, m, logits.dim(-1))
+    // each token's log-probability, then each option's sum (a 0/1 matrix [options, m] times them)
+    val lp = subtract(reshape(takeAlong(pred, ints(targets.toArray, m, 1), 1), m), logsumexp(pred, 1))
+    val all = spans.flatten
+    val sumOf = Array.fill(all.size * m)(0f)
+    for ((s, e), k) <- all.zipWithIndex; r <- s until e do sumOf(k * m + r) = 1f
+    val scores = reshape(matmul(floats(sumOf, all.size, m), reshape(lp, m, 1)), all.size)
+    // per choice: −log softmax at the meant option; the mean over choices
+    var at0 = 0
+    val terms = choices.zip(spans).map { (c, sp) =>
+      val s = slice(scores, Seq(at0), Seq(at0 + sp.size))
+      at0 += sp.size
+      subtract(logsumexp(s, 0), slice(s, Seq(c.meant), Seq(c.meant + 1)))
+    }
+    divide(sum(concatenate(terms, 0), 0), scalar(choices.size.toFloat))
+
+  /** one AdamW step on choices among options, over their trie (`lossChoices`): the loss before the step */
+  def stepChoices(choices: Seq[Choice]): Float = stepOn(lossChoices(choices))
+
+  /** the choices' loss as the adapters are now (no step) */
+  def evaluateChoices(choices: Seq[Choice]): Float =
+    val s = new Scope
+    try
+      attach(params)
+      lossChoices(choices)(params)(using s).itemFloat
+    finally
+      s.close()
+      model.lora = Map.empty
+      model.training(false)
+
   /** one AdamW step on B examples over their trie: the mean of their losses before the step (`lossTree`) */
   def stepTree(examples: Seq[(Array[Int], Int)]): Float = stepOn(lossTree(examples))
 
@@ -242,6 +305,11 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
     keep.close()
 
 object Lora:
+  /** A CHOICE AMONG OPTIONS (`Lora.stepChoices`): a context (its tokens) and its options' tokens (each with its own
+   * end), the one meant — a reader trained as it reads: the options' log-probabilities after the context, the meant
+   * one's share among them */
+  final case class Choice(context: Array[Int], options: Vector[Array[Int]], meant: Int)
+
   /** an adapter saved by `save`, put on the model for generation: its scope (close it, and take the adapter off
    * with `model.lora = Map.empty`, when done) */
   def attach(model: Adaptable, path: String): Scope =
