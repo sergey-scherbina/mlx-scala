@@ -56,3 +56,10 @@ on Native (`withEmbedResources`). Lines of code at most 120 characters.
   `EmbedTrain`: contrastive LoRA (InfoNCE, in-batch negatives); while training, Qwen3's attention by ops (the fused
   kernel has no gradient for short queries). Code search (`searchBench`, `embedTrainBench`, pairs from okay-forge's
   SearchPairs): held-out projects MRR 0.480 → 0.598, @1 34.1 → 47.3 in 2 minutes on 333 pairs.
+- LoRA TRAINING OF A READER (2026-11-19, okay-desk specs/frames.md §5.12): train in tries, not one example a step —
+  `lora.epochTree(examples, rnd, batch = 8)` (`Model.hiddenTree`: examples sharing a prompt's beginning run it once,
+  each token attends to its ancestors, RoPE by depth). Batches of 8 at lr 2e-4: 1.8× faster an epoch AND the reader
+  wrong 51 against 93 of 1004 never-trained questions, three seeds alike. `stepBatch` (padded, no sharing) is the
+  plain batch. `stepChoices` (the listwise loss over a trie) ALONE collapsed a frame reader (it asked about 766 of
+  1004: the options' scores flattened) — use it beside the generative loss, not instead. Laws: `LoraBatchSuite` (a
+  batch's, a trie's and the choices' losses against single passes, within 1%).

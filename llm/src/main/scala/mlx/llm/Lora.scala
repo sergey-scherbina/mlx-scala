@@ -174,6 +174,23 @@ final class Lora(val model: Adaptable, rank: Int = 8, projs: Seq[String] = Seq("
   /** one AdamW step on B examples over their trie: the mean of their losses before the step (`lossTree`) */
   def stepTree(examples: Seq[(Array[Int], Int)]): Float = stepOn(lossTree(examples))
 
+  /** AN EPOCH IN TRIES — the way to train a reader whose prompts share a beginning (a rule, a table, a schema):
+   * the examples shuffled, within each window of 16 batches sorted by their tokens (examples over one table land
+   * in one batch), each batch of `batch` one `stepTree`; the batches in random order. Its mean loss.
+   * Measured (okay-desk specs/frames.md §5.12): batches of 8 at lr 2e-4 against one example a step — 1.8× faster an
+   * epoch, and the reader wrong 51 against 93 of 1004 questions never trained on, over three seeds alike */
+  def epochTree(examples: Seq[(Array[Int], Int)], rnd: scala.util.Random, batch: Int = 8): Float =
+    given Ordering[Array[Int]] = (a, b) =>
+      val i = a.indices.find(k => k >= b.length || a(k) != b(k))
+      i.fold(a.length - b.length)(k => if k >= b.length then 1 else Integer.compare(a(k), b(k)))
+    val batches = rnd.shuffle(examples.toVector).grouped(batch * 16).toVector
+      .flatMap(w => w.sortBy(_._1).grouped(batch).toVector)
+    var sum = 0.0; var n = 0
+    for b <- rnd.shuffle(batches) do
+      sum += (if b.size == 1 then step(b.head._1, b.head._2) else stepTree(b)) * b.size
+      n += b.size
+    (sum / math.max(1, n)).toFloat
+
   /** the trie's loss as the adapters are now (no step) — the law: the mean of `evaluate` over its examples */
   def evaluateTree(examples: Seq[(Array[Int], Int)]): Float =
     val s = new Scope
