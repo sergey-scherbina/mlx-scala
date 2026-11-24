@@ -6,10 +6,14 @@ import java.nio.file.{Files, Path}
 import mlx.*
 import mlx.Mlx.*
 
-/** Qwen3's shape, from its config.json */
+/** Qwen3's shape, from its config.json. `layerMap`: A LOOPED MODEL (okay-desk SPRINT; Inkling 2's middle layers run
+ * three times): the weights each of the `layers` applications uses, by their index in the file (`okay_layer_map`
+ * in config.json) — one layer's weights applied more than once; each application keeps its own cache and its
+ * own LoRA. Empty: application i uses layer i */
 final case class Qwen3Config(
     hidden: Int, layers: Int, heads: Int, kvHeads: Int, headDim: Int, ropeTheta: Float, eps: Float,
-    groupSize: Int, bits: Int, eos: Int)
+    groupSize: Int, bits: Int, eos: Int, layerMap: Vector[Int] = Vector.empty):
+  def weightsOf(application: Int): Int = if layerMap.isEmpty then application else layerMap(application)
 
 object Qwen3Config:
   def apply(json: Json): Qwen3Config =
@@ -17,7 +21,8 @@ object Qwen3Config:
     val q = json("quantization")
     Qwen3Config(json("hidden_size").int, json("num_hidden_layers").int, json("num_attention_heads").int,
       json("num_key_value_heads").int, json("head_dim").int, json("rope_theta").double.toFloat,
-      json("rms_norm_eps").double.toFloat, q("group_size").int, q("bits").int, json("eos_token_id").int)
+      json("rms_norm_eps").double.toFloat, q("group_size").int, q("bits").int, json("eos_token_id").int,
+      json.field("okay_layer_map").fold(Vector.empty[Int])(_.list.map(_.int)))
 
 /** a linear layer with quantized weights: x · wᵀ */
 final class QLinear(w: Arr, scales: Arr, biases: Arr, groupSize: Int, bits: Int):
@@ -134,7 +139,8 @@ final class Qwen3 private (val config: Qwen3Config, weights: Map[String, Arr], o
     val up: QLinear = lin(s"$p.mlp.up_proj")
     val down: QLinear = lin(s"$p.mlp.down_proj")
 
-  private val blocks = Vector.tabulate(layers)(Layer(_))
+  // (a looped model: the applications that share weights share these objects' arrays, `weightsOf`)
+  private val blocks = Vector.tabulate(layers)(i => Layer(config.weightsOf(i)))
   /** after each layer, the residual stream [1, n, hidden] to a hook: read (a direction measured) or changed (steered);
    * none by default */
   var hook: Qwen3.Hook | Null = null
